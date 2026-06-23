@@ -1,0 +1,19 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pypdf
+pymupdf
+pdfplumber
+python-docx
+openpyxl
+python-pptx
+Pillow
+pdf2image
+pytesseract
+# Auth
+motor
+pymongo
+passlib[bcrypt]
+python-jose[cryptography]
+httpx
+pydantic[email]

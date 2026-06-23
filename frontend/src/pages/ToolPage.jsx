@@ -1,0 +1,249 @@
+import { useState, useRef } from "react";
+
+const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+export default function ToolPage({ tool, onBack }) {
+  const [files, setFiles] = useState([]);
+  const [fields, setFields] = useState(() => Object.fromEntries(tool.fields.map((f) => [f.name, f.placeholder || ""])));
+  const [status, setStatus] = useState("idle"); // idle | uploading | done | error
+  const [error, setError] = useState("");
+  const [downloadUrl, setDownloadUrl] = useState(null);
+  const [downloadName, setDownloadName] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+  const inputRef = useRef();
+
+  const handleFiles = (newFiles) => {
+    if (tool.multiFile) {
+      setFiles((prev) => [...prev, ...Array.from(newFiles)]);
+    } else {
+      setFiles([newFiles[0]]);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    handleFiles(e.dataTransfer.files);
+  };
+
+  const handleSubmit = async () => {
+    if (files.length === 0) return;
+    setStatus("uploading");
+    setError("");
+    setDownloadUrl(null);
+
+    try {
+      const form = new FormData();
+      if (tool.multiFile) {
+        files.forEach((f) => form.append("files", f));
+      } else {
+        form.append("file", files[0]);
+      }
+      Object.entries(fields).forEach(([k, v]) => {
+        if (v) form.append(k, v);
+      });
+
+      const res = await fetch(`${API}${tool.endpoint}`, { method: "POST", body: form });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Server error" }));
+        throw new Error(err.detail || "Processing failed");
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const name = match ? match[1] : `output_${tool.id}`;
+
+      setDownloadUrl(url);
+      setDownloadName(name);
+      setStatus("done");
+    } catch (err) {
+      setError(err.message);
+      setStatus("error");
+    }
+  };
+
+  const reset = () => {
+    setFiles([]);
+    setStatus("idle");
+    setError("");
+    setDownloadUrl(null);
+    setFields(Object.fromEntries(tool.fields.map((f) => [f.name, f.placeholder || ""])));
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f7f8fc", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+      {/* Nav */}
+      <nav style={{ background: "#fff", borderBottom: "1px solid #e8eaf0", padding: "0 2rem", display: "flex", alignItems: "center", height: 60, position: "sticky", top: 0, zIndex: 100 }}>
+        <button
+          onClick={onBack}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "#666", display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 8 }}
+        >
+          ← All Tools
+        </button>
+        <div style={{ flex: 1, textAlign: "center", fontWeight: 700, fontSize: 16, color: "#1a1a2e" }}>
+          {tool.icon} {tool.label}
+        </div>
+        <div style={{ width: 120 }} />
+      </nav>
+
+      {/* Hero */}
+      <div style={{ background: `linear-gradient(135deg, ${tool.color} 0%, ${tool.color}cc 100%)`, padding: "40px 2rem", textAlign: "center", color: "#fff" }}>
+        <div style={{ fontSize: 48, marginBottom: 12 }}>{tool.icon}</div>
+        <h1 style={{ fontSize: 28, fontWeight: 900, margin: "0 0 8px", letterSpacing: "-0.5px" }}>{tool.label}</h1>
+        <p style={{ opacity: 0.9, margin: 0, fontSize: 16 }}>{tool.desc}</p>
+      </div>
+
+      <div style={{ maxWidth: 640, margin: "0 auto", padding: "2rem" }}>
+        {status === "done" ? (
+          <DoneCard downloadUrl={downloadUrl} downloadName={downloadName} onReset={reset} color={tool.color} />
+        ) : (
+          <>
+            {/* Drop zone */}
+            <div
+              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => inputRef.current.click()}
+              style={{
+                border: `2px dashed ${isDragging ? tool.color : "#ccd"}`,
+                borderRadius: 16,
+                padding: "3rem 2rem",
+                textAlign: "center",
+                cursor: "pointer",
+                background: isDragging ? `${tool.color}11` : "#fff",
+                transition: "all 0.15s",
+                marginBottom: "1.5rem",
+              }}
+            >
+              <input
+                ref={inputRef}
+                type="file"
+                multiple={tool.multiFile}
+                accept={tool.accepts}
+                style={{ display: "none" }}
+                onChange={(e) => handleFiles(e.target.files)}
+              />
+              {files.length === 0 ? (
+                <>
+                  <div style={{ fontSize: 48, marginBottom: 12 }}>📂</div>
+                  <div style={{ fontWeight: 700, fontSize: 18, color: "#1a1a2e", marginBottom: 6 }}>
+                    {tool.multiFile ? "Select files or drag & drop" : "Select a file or drag & drop"}
+                  </div>
+                  <div style={{ color: "#888", fontSize: 14 }}>Accepts: {tool.accepts}</div>
+                </>
+              ) : (
+                <div>
+                  {files.map((f, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 8, color: "#333", fontSize: 14 }}>
+                      <span>📄</span>
+                      <span style={{ fontWeight: 600 }}>{f.name}</span>
+                      <span style={{ color: "#999" }}>({(f.size / 1024).toFixed(0)} KB)</span>
+                    </div>
+                  ))}
+                  <div style={{ color: tool.color, fontSize: 13, marginTop: 8, cursor: "pointer", fontWeight: 600 }}>
+                    {tool.multiFile ? "+ Add more files" : "Click to change file"}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Fields */}
+            {tool.fields.length > 0 && (
+              <div style={{ background: "#fff", borderRadius: 16, padding: "1.5rem", border: "1px solid #e8eaf0", marginBottom: "1.5rem" }}>
+                <h3 style={{ margin: "0 0 1rem", fontSize: 15, fontWeight: 700, color: "#1a1a2e" }}>Options</h3>
+                {tool.fields.map((field) => (
+                  <div key={field.name} style={{ marginBottom: "1rem" }}>
+                    <label style={{ display: "block", fontWeight: 600, fontSize: 13, color: "#444", marginBottom: 6 }}>
+                      {field.label}
+                    </label>
+                    {field.type === "select" ? (
+                      <select
+                        value={fields[field.name]}
+                        onChange={(e) => setFields((p) => ({ ...p, [field.name]: e.target.value }))}
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #dde", fontSize: 14, outline: "none" }}
+                      >
+                        {field.options.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type={field.type}
+                        value={fields[field.name]}
+                        placeholder={field.placeholder}
+                        onChange={(e) => setFields((p) => ({ ...p, [field.name]: e.target.value }))}
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #dde", fontSize: 14, outline: "none", boxSizing: "border-box" }}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {error && (
+              <div style={{ background: "#fff0f0", border: "1px solid #fcc", borderRadius: 10, padding: "12px 16px", color: "#c33", marginBottom: "1rem", fontSize: 14 }}>
+                ⚠️ {error}
+              </div>
+            )}
+
+            <button
+              onClick={handleSubmit}
+              disabled={files.length === 0 || status === "uploading"}
+              style={{
+                width: "100%",
+                padding: "16px",
+                borderRadius: 12,
+                border: "none",
+                background: files.length === 0 ? "#ccc" : tool.color,
+                color: "#fff",
+                fontSize: 16,
+                fontWeight: 700,
+                cursor: files.length === 0 ? "not-allowed" : "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              {status === "uploading" ? "⏳ Processing…" : `${tool.label} →`}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DoneCard({ downloadUrl, downloadName, onReset, color }) {
+  return (
+    <div style={{ background: "#fff", borderRadius: 20, padding: "3rem 2rem", textAlign: "center", border: "1px solid #e8eaf0", boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
+      <div style={{ fontSize: 56, marginBottom: 16 }}>✅</div>
+      <h2 style={{ fontWeight: 800, fontSize: 24, color: "#1a1a2e", marginBottom: 8 }}>Done!</h2>
+      <p style={{ color: "#777", marginBottom: 28 }}>Your file has been processed successfully.</p>
+      <a
+        href={downloadUrl}
+        download={downloadName}
+        style={{
+          display: "inline-block",
+          background: color,
+          color: "#fff",
+          padding: "14px 32px",
+          borderRadius: 12,
+          fontWeight: 700,
+          fontSize: 16,
+          textDecoration: "none",
+          marginBottom: 16,
+        }}
+      >
+        ⬇ Download {downloadName}
+      </a>
+      <br />
+      <button
+        onClick={onReset}
+        style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 14, marginTop: 8 }}
+      >
+        ← Process another file
+      </button>
+    </div>
+  );
+}
