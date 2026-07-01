@@ -8,8 +8,8 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from ..core.database import get_db
-from ..core.deps import get_current_user
+from core.database import get_db
+from core.deps import get_current_user
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 

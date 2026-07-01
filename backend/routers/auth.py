@@ -9,17 +9,17 @@ from fastapi.responses import RedirectResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from ..core.config import settings
-from ..core.database import get_db
-from ..core.deps import get_current_user
-from ..core.security import (
+from core.config import settings
+from core.database import get_db
+from core.deps import get_current_user
+from core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
     hash_password,
     verify_password,
 )
-from ..models.user import UserLogin, UserOut, UserRegister
+from models.user import UserLogin, UserOut, UserRegister
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
