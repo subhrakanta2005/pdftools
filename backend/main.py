@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import os
 import shutil
@@ -507,6 +508,247 @@ def _info_sync(data: bytes) -> dict:
     }
 
 
+# ─── NEW TOOLS: redact, sign, edit, compare, scan-to-pdf, pdf-to-pdfa, repair ─
+
+def _redact_sync(data: bytes, regions: list) -> bytes:
+    """regions: list of {page: int (0-indexed), x0, y0, x1, y1} in PDF points.
+    Uses PyMuPDF's real redaction (add_redact_annot + apply_redactions), which
+    actually strips the underlying text/image content in that area — not just
+    a black rectangle drawn on top (which would still leave the original data
+    extractable/copyable underneath)."""
+    import fitz
+    doc = fitz.open(stream=data, filetype="pdf")
+    by_page = {}
+    for r in regions:
+        by_page.setdefault(int(r["page"]), []).append(r)
+
+    for page_num, rects in by_page.items():
+        if page_num < 0 or page_num >= len(doc):
+            continue
+        page = doc[page_num]
+        for r in rects:
+            rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+            page.add_redact_annot(rect, fill=(0, 0, 0))
+        page.apply_redactions()
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _sign_sync(data: bytes, signature_png: bytes, page_num: int, x: float, y: float, width: float, height: float) -> bytes:
+    """Stamp a signature image onto a specific page at the given position/size
+    (in PDF points, top-left origin, matching how a rendered-page preview in
+    the frontend would report click coordinates)."""
+    import fitz
+    doc = fitz.open(stream=data, filetype="pdf")
+    if page_num < 0 or page_num >= len(doc):
+        raise ValueError(f"Page {page_num} out of range (document has {len(doc)} pages)")
+    page = doc[page_num]
+    rect = fitz.Rect(x, y, x + width, y + height)
+    page.insert_image(rect, stream=signature_png)
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _edit_sync(data: bytes, operations: list) -> bytes:
+    """operations: list of dicts, each one of:
+      {type: "text", page, x, y, text, font_size, color: [r,g,b] 0-1}
+      {type: "rect", page, x, y, width, height, color: [r,g,b], fill: bool}
+      {type: "circle", page, x, y, radius, color: [r,g,b], fill: bool}
+      {type: "line", page, x1, y1, x2, y2, color: [r,g,b]}
+    Coordinates in PDF points, top-left origin."""
+    import fitz
+    doc = fitz.open(stream=data, filetype="pdf")
+
+    for op in operations:
+        page_num = int(op["page"])
+        if page_num < 0 or page_num >= len(doc):
+            continue
+        page = doc[page_num]
+        color = tuple(op.get("color", [0, 0, 0]))
+        op_type = op["type"]
+
+        if op_type == "text":
+            page.insert_text(
+                (op["x"], op["y"]),
+                op.get("text", ""),
+                fontsize=float(op.get("font_size", 14)),
+                color=color,
+            )
+        elif op_type == "rect":
+            rect = fitz.Rect(op["x"], op["y"], op["x"] + op["width"], op["y"] + op["height"])
+            page.draw_rect(rect, color=color, fill=color if op.get("fill") else None)
+        elif op_type == "circle":
+            center = fitz.Point(op["x"], op["y"])
+            page.draw_circle(center, float(op["radius"]), color=color, fill=color if op.get("fill") else None)
+        elif op_type == "line":
+            page.draw_line(fitz.Point(op["x1"], op["y1"]), fitz.Point(op["x2"], op["y2"]), color=color)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _compare_sync(data_a: bytes, data_b: bytes) -> bytes:
+    """Produces a downloadable PDF report: page-by-page unified text diff
+    between the two documents. (Text diff, not pixel diff — a 1px rendering
+    shift would swamp a visual diff with noise, whereas text diff surfaces
+    actual content changes.)"""
+    import pdfplumber
+    import difflib
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.pagesizes import letter
+
+    def extract_pages(data):
+        pages = []
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            for p in pdf.pages:
+                pages.append(p.extract_text() or "")
+        return pages
+
+    pages_a = extract_pages(data_a)
+    pages_b = extract_pages(data_b)
+    max_pages = max(len(pages_a), len(pages_b))
+
+    styles = getSampleStyleSheet()
+    mono = ParagraphStyle("mono", parent=styles["Normal"], fontName="Courier", fontSize=8, leading=10)
+    added_style = ParagraphStyle("added", parent=mono, backColor="#e6ffed")
+    removed_style = ParagraphStyle("removed", parent=mono, backColor="#ffeef0")
+    heading = ParagraphStyle("heading", parent=styles["Heading2"])
+
+    def esc(s):
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    story = [Paragraph("PDF Comparison Report", styles["Title"]), Spacer(1, 12)]
+    any_diff = False
+
+    for i in range(max_pages):
+        text_a = pages_a[i] if i < len(pages_a) else ""
+        text_b = pages_b[i] if i < len(pages_b) else ""
+        if text_a == text_b:
+            continue
+        any_diff = True
+        story.append(Paragraph(f"Page {i + 1}", heading))
+        lines_a = text_a.splitlines()
+        lines_b = text_b.splitlines()
+        sm = difflib.SequenceMatcher(None, lines_a, lines_b)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                for line in lines_a[i1:i2][:3]:  # keep unchanged context short
+                    story.append(Paragraph(esc(line) or "&nbsp;", mono))
+            elif tag == "delete":
+                for line in lines_a[i1:i2]:
+                    story.append(Paragraph(f"- {esc(line)}", removed_style))
+            elif tag == "insert":
+                for line in lines_b[j1:j2]:
+                    story.append(Paragraph(f"+ {esc(line)}", added_style))
+            elif tag == "replace":
+                for line in lines_a[i1:i2]:
+                    story.append(Paragraph(f"- {esc(line)}", removed_style))
+                for line in lines_b[j1:j2]:
+                    story.append(Paragraph(f"+ {esc(line)}", added_style))
+        story.append(Spacer(1, 16))
+
+    if not any_diff:
+        story.append(Paragraph("No text differences were found between the two documents.", styles["Normal"]))
+    if len(pages_a) != len(pages_b):
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(
+            f"Note: document A has {len(pages_a)} page(s), document B has {len(pages_b)} page(s).",
+            styles["Italic"],
+        ))
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter)
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _scan_to_pdf_sync(images: List[bytes]) -> bytes:
+    """images: list of raw image bytes (phone/desktop camera or gallery
+    upload). Applies basic scan cleanup (grayscale + autocontrast) to each,
+    then assembles into a single multi-page PDF."""
+    from PIL import Image, ImageOps
+    pil_pages = []
+    for raw in images:
+        img = Image.open(io.BytesIO(raw))
+        img = img.convert("RGB")
+        gray = ImageOps.grayscale(img)
+        enhanced = ImageOps.autocontrast(gray, cutoff=1)
+        pil_pages.append(enhanced.convert("RGB"))
+
+    if not pil_pages:
+        raise ValueError("No images provided")
+
+    buf = io.BytesIO()
+    pil_pages[0].save(buf, format="PDF", save_all=True, append_images=pil_pages[1:])
+    return buf.getvalue()
+
+
+def _pdf_to_pdfa_sync(work_dir: Path, src_path: Path) -> bytes:
+    """Convert to PDF/A-2b using Ghostscript. Requires the `gs` binary on the
+    server — same system-dependency caveat as the LibreOffice-based tools.
+    On Render, add `ghostscript` to the apt packages list alongside
+    libreoffice/tesseract-ocr/poppler-utils."""
+    out_path = work_dir / "converted.pdf"
+    cmd = [
+        "gs",
+        "-dPDFA=2",
+        "-dBATCH",
+        "-dNOPAUSE",
+        "-dNOOUTERSAVE",
+        "-sColorConversionStrategy=UseDeviceIndependentColor",
+        "-sDEVICE=pdfwrite",
+        "-dPDFACompatibilityPolicy=1",
+        f"-sOutputFile={out_path}",
+        str(src_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0 or not out_path.exists():
+        raise HTTPException(500, f"PDF/A conversion failed: {result.stderr.decode(errors='replace')[:300]}")
+    return out_path.read_bytes()
+
+
+def _repair_sync(data: bytes) -> bytes:
+    """Attempt 1: pypdf lenient read + rewrite (fixes many malformed xref
+    tables without needing any external process). Attempt 2 (fallback):
+    Ghostscript, which recovers more severely damaged PDFs but requires the
+    `gs` binary on the server."""
+    from pypdf import PdfReader, PdfWriter
+
+    try:
+        reader = PdfReader(io.BytesIO(data), strict=False)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+        buf = io.BytesIO()
+        writer.write(buf)
+        result = buf.getvalue()
+        # Sanity check: does the rewritten file actually open and have pages?
+        PdfReader(io.BytesIO(result), strict=False).pages[0]
+        return result
+    except Exception:
+        pass  # fall through to Ghostscript
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = tmp_path / "input.pdf"
+        src.write_bytes(data)
+        out = tmp_path / "repaired.pdf"
+        cmd = ["gs", "-o", str(out), "-sDEVICE=pdfwrite", "-dPDFSTOPONERROR=false", str(src)]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0 or not out.exists():
+            raise HTTPException(500, f"Could not repair this PDF: {result.stderr.decode(errors='replace')[:300]}")
+        return out.read_bytes()
+
+
+
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
 @app.post("/merge")
@@ -718,6 +960,81 @@ async def extract_images(file: UploadFile = File(...), user=Depends(get_optional
 async def pdf_info(file: UploadFile = File(...), user=Depends(get_optional_user)):
     data = await intake_bytes(file, user, "info")
     return await run_in_threadpool(_info_sync, data)
+
+
+@app.post("/redact")
+async def redact_pdf(file: UploadFile = File(...), regions: str = Form(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "redact")
+    try:
+        parsed_regions = json.loads(regions)
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'regions must be valid JSON, e.g. [{"page":0,"x0":10,"y0":10,"x1":100,"y1":40}]')
+    result = await run_in_threadpool(_redact_sync, data, parsed_regions)
+    return pdf_response(result, "redacted.pdf")
+
+
+@app.post("/edit")
+async def edit_pdf(file: UploadFile = File(...), operations: str = Form(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "edit")
+    try:
+        parsed_ops = json.loads(operations)
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'operations must be valid JSON, e.g. [{"type":"text","page":0,"x":100,"y":400,"text":"Hi"}]')
+    result = await run_in_threadpool(_edit_sync, data, parsed_ops)
+    return pdf_response(result, "edited.pdf")
+
+
+@app.post("/sign")
+async def sign_pdf(
+    file: UploadFile = File(...),
+    signature: UploadFile = File(...),
+    page: int = Form(0),
+    x: float = Form(...),
+    y: float = Form(...),
+    width: float = Form(150),
+    height: float = Form(60),
+    user=Depends(get_optional_user),
+):
+    data = await intake_bytes(file, user, "sign")
+    sig_bytes = await signature.read()
+    if len(sig_bytes) > settings.MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Signature image is too large.")
+    result = await run_in_threadpool(_sign_sync, data, sig_bytes, page, x, y, width, height)
+    return pdf_response(result, "signed.pdf")
+
+
+@app.post("/compare")
+async def compare_pdfs(files: List[UploadFile] = File(...), user=Depends(get_optional_user)):
+    if len(files) != 2:
+        raise HTTPException(400, "Upload exactly two PDFs to compare (original first, then the revised version).")
+    items = await intake_bytes_many(files, user, "compare")
+    result = await run_in_threadpool(_compare_sync, items[0][1], items[1][1])
+    return pdf_response(result, "comparison_report.pdf")
+
+
+@app.post("/scan-to-pdf")
+async def scan_to_pdf(files: List[UploadFile] = File(...), user=Depends(get_optional_user)):
+    items = await intake_bytes_many(files, user, "scan-to-pdf")
+    result = await run_in_threadpool(_scan_to_pdf_sync, [data for _, data in items])
+    return pdf_response(result, "scanned.pdf")
+
+
+@app.post("/pdf-to-pdfa")
+async def pdf_to_pdfa(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    work_dir = new_work_dir()
+    try:
+        path = await intake_to_file(file, user, "pdf-to-pdfa", work_dir)
+        result = await run_in_threadpool(_pdf_to_pdfa_sync, work_dir, path)
+        return pdf_response(result, "converted_pdfa.pdf")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/repair")
+async def repair_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "repair")
+    result = await run_in_threadpool(_repair_sync, data)
+    return pdf_response(result, "repaired.pdf")
 
 
 @app.get("/health")
