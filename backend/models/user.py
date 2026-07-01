@@ -22,3 +22,12 @@ class UserOut(BaseModel):
     provider: str = "email"
     usage_count: int = 0
     created_at: datetime
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=6)
