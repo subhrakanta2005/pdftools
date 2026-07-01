@@ -3,7 +3,7 @@ import { useAuth } from "../context/AuthContext";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-export default function LoginPage({ onSuccess, onSwitchToRegister }) {
+export default function LoginPage({ onSuccess, onSwitchToRegister, onForgotPassword }) {
   const { login, loginWithGoogle } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -51,7 +51,12 @@ export default function LoginPage({ onSuccess, onSwitchToRegister }) {
             />
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>Password</label>
+            <div style={styles.labelRow}>
+              <label style={styles.label}>Password</label>
+              {onForgotPassword && (
+                <span onClick={onForgotPassword} style={styles.forgotLink}>Forgot password?</span>
+              )}
+            </div>
             <input
               type="password"
               value={password}
@@ -99,6 +104,8 @@ const styles = {
   divider: { textAlign: "center", color: "#bbb", fontSize: 13, marginBottom: "1.5rem", position: "relative", borderTop: "1px solid #eee", lineHeight: 0 },
   field: { marginBottom: "1rem" },
   label: { display: "block", fontSize: 13, fontWeight: 600, color: "#444", marginBottom: 6 },
+  labelRow: { display: "flex", alignItems: "center", justifyContent: "space-between" },
+  forgotLink: { fontSize: 13, fontWeight: 600, color: "#e63946", cursor: "pointer", marginBottom: 6 },
   input: { width: "100%", padding: "11px 14px", borderRadius: 10, border: "1.5px solid #dde", fontSize: 15, outline: "none", boxSizing: "border-box", fontFamily: "inherit" },
   error: { background: "#fff0f0", border: "1px solid #fcc", borderRadius: 8, padding: "10px 14px", color: "#c33", fontSize: 13, marginBottom: "1rem" },
   submitBtn: { width: "100%", padding: "13px", borderRadius: 10, border: "none", background: "#e63946", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", marginTop: 4 },
