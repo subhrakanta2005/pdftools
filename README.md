@@ -38,6 +38,13 @@ An iLovePDF-style website with **25+ working PDF tools**, React frontend, and Fa
 
 ### Advanced
 - ✅ OCR PDF – extract text from scanned PDFs (Tesseract)
+- ✅ Redact PDF – permanently strip sensitive text/areas (PyMuPDF real redaction, not a visual cover-up)
+- ✅ Edit PDF – add text, rectangles, circles or lines directly onto a page
+- ✅ Sign PDF – stamp a signature image at a chosen position
+- ✅ Compare PDF – text-diff report between two versions of a document
+- ✅ Scan to PDF – assemble cleaned-up photos into a multi-page PDF
+- ✅ PDF to PDF/A – convert to the ISO archival format (Ghostscript)
+- ✅ Repair PDF – recover data from a corrupted PDF (pypdf, falls back to Ghostscript)
 
 ## Local Development
 
@@ -50,7 +57,7 @@ uvicorn main:app --reload --port 8000
 
 **System dependencies (Ubuntu/Debian):**
 ```bash
-sudo apt install libreoffice tesseract-ocr poppler-utils
+sudo apt install libreoffice tesseract-ocr poppler-utils ghostscript
 ```
 
 ### Frontend
@@ -68,7 +75,8 @@ npm run dev
 2. Build: `pip install -r backend/requirements.txt`
 3. Start: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
 4. Set env var: `PYTHON_VERSION=3.11`
-5. Add `apt` packages in Render dashboard: `libreoffice tesseract-ocr poppler-utils`
+5. Add `apt` packages in Render dashboard: `libreoffice tesseract-ocr poppler-utils ghostscript`
+   (ghostscript is new — needed by PDF to PDF/A and by Repair PDF's fallback path)
 
 ### Frontend → Vercel
 1. Connect `frontend/` folder to Vercel
@@ -78,5 +86,5 @@ npm run dev
 ## Tech Stack
 - **Frontend:** React 18 + Vite (no extra UI libraries)
 - **Backend:** FastAPI + Uvicorn
-- **PDF Processing:** PyMuPDF (fitz), pypdf, pdfplumber, python-docx, openpyxl, python-pptx
-- **System Tools:** LibreOffice, Tesseract OCR, poppler-utils
+- **PDF Processing:** PyMuPDF (fitz), pypdf, pdfplumber, python-docx, openpyxl, python-pptx, reportlab
+- **System Tools:** LibreOffice, Tesseract OCR, poppler-utils, Ghostscript
