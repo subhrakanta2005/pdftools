@@ -4,6 +4,7 @@ from .config import settings
 client: AsyncIOMotorClient = None
 db = None
 
+
 async def connect_db():
     global client, db
     client = AsyncIOMotorClient(settings.MONGODB_URL)
@@ -12,12 +13,18 @@ async def connect_db():
     await db.users.create_index("email", unique=True)
     await db.refresh_tokens.create_index("token", unique=True)
     await db.refresh_tokens.create_index("expires_at", expireAfterSeconds=0)
+    # NOTE: blacklisted refresh tokens are stored in a separate collection
+    # (token_blacklist) — it needs its own TTL index or it grows forever.
+    await db.token_blacklist.create_index("token", unique=True)
+    await db.token_blacklist.create_index("expires_at", expireAfterSeconds=0)
     print("✅ MongoDB connected")
+
 
 async def close_db():
     global client
     if client:
         client.close()
+
 
 def get_db():
     return db

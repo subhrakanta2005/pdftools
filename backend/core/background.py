@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -11,20 +12,31 @@ FILE_MAX_AGE_SECONDS = 2 * 60 * 60  # 2 hours
 
 
 async def cleanup_temp_files():
-    """Delete temp files older than 2 hours."""
+    """Delete temp files/dirs older than 2 hours.
+
+    Requests now write into per-request subdirectories under UPLOAD_DIR
+    (cleaned up immediately after each response via BackgroundTask), but this
+    sweep is the safety net for anything left behind by a crashed/killed
+    request.
+    """
     if not UPLOAD_DIR.exists():
         return
     now = time.time()
     deleted = 0
     for f in UPLOAD_DIR.iterdir():
         try:
-            if f.is_file() and (now - f.stat().st_mtime) > FILE_MAX_AGE_SECONDS:
+            age = now - f.stat().st_mtime
+            if age <= FILE_MAX_AGE_SECONDS:
+                continue
+            if f.is_dir():
+                shutil.rmtree(f, ignore_errors=True)
+            else:
                 f.unlink()
-                deleted += 1
+            deleted += 1
         except Exception as e:
             logger.warning(f"Could not delete {f}: {e}")
     if deleted:
-        logger.info(f"🧹 Cleaned up {deleted} temp files")
+        logger.info(f"🧹 Cleaned up {deleted} stale temp file(s)/dir(s)")
 
 
 async def cleanup_loop():
