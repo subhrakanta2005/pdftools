@@ -9,18 +9,25 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.database import connect_db, close_db
 from .core.config import settings
+from .core.deps import get_optional_user
+from .core.limits import check_file_size, check_tool_access, check_and_increment_ops
+from .core.background import start_background_tasks, cleanup_temp_files
 from .routers import auth as auth_router
+from .routers import payments as payments_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_db()
+    await cleanup_temp_files()  # clean stale files on startup
+    app_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    start_background_tasks(app_url)
     yield
     await close_db()
 
@@ -36,15 +43,27 @@ app.add_middleware(
 )
 
 app.include_router(auth_router.router)
+app.include_router(payments_router.router)
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "pdftools"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 
-def save_upload(file: UploadFile) -> Path:
+async def save_upload_checked(file: UploadFile, user=None, tool_id: str = "") -> Path:
+    """Save upload after checking file size, tool access, and rate limits."""
+    data = await file.read()
+    await check_file_size(len(data), user)
+    await check_tool_access(tool_id, user)
+    db_ref = None
+    try:
+        from .core.database import get_db
+        db_ref = get_db()
+    except Exception:
+        pass
+    if db_ref is not None:
+        await check_and_increment_ops(user, db_ref, tool_id)
     dest = UPLOAD_DIR / file.filename
-    with open(dest, "wb") as f:
-        f.write(file.file.read())
+    dest.write_bytes(data)
     return dest
 
 
@@ -58,13 +77,30 @@ def stream_file(path: Path, media_type: str = "application/pdf", filename: str =
     )
 
 
+def save_upload(file: UploadFile) -> Path:
+    """Sync helper for endpoints not yet using auth checks."""
+    dest = UPLOAD_DIR / file.filename
+    dest.write_bytes(file.file.read())
+    return dest
+
+
 # ─── MERGE ──────────────────────────────────────────────────────────────────
 @app.post("/merge")
-async def merge_pdfs(files: List[UploadFile] = File(...)):
+async def merge_pdfs(files: List[UploadFile] = File(...), user=Depends(get_optional_user)):
     from pypdf import PdfWriter, PdfReader
     writer = PdfWriter()
-    for f in files:
-        path = save_upload(f)
+    for i, f in enumerate(files):
+        data = await f.read()
+        if i == 0:
+            await check_file_size(len(data), user)
+            await check_tool_access("merge", user)
+            try:
+                from .core.database import get_db
+                await check_and_increment_ops(user, get_db(), "merge")
+            except Exception:
+                pass
+        path = UPLOAD_DIR / f.filename
+        path.write_bytes(data)
         reader = PdfReader(str(path))
         for page in reader.pages:
             writer.add_page(page)
@@ -497,14 +533,20 @@ async def html_to_pdf(file: UploadFile = File(...)):
 
 # ─── OCR ────────────────────────────────────────────────────────────────────
 @app.post("/ocr")
-async def ocr_pdf(file: UploadFile = File(...)):
+async def ocr_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
     import fitz
     import pytesseract
     from PIL import Image
-    path = save_upload(file)
+    from .core.limits import get_limits
+    path = await save_upload_checked(file, user, "ocr")
+    limits = get_limits(user)
+    page_limit = limits["ocr_page_limit"]
     doc = fitz.open(str(path))
     text_parts = []
     for i, page in enumerate(doc):
+        if page_limit is not None and i >= page_limit:
+            text_parts.append(f"=== Page {i+1} === [upgrade to Pro to OCR all pages]")
+            continue
         mat = fitz.Matrix(2, 2)
         pix = page.get_pixmap(matrix=mat)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -512,11 +554,7 @@ async def ocr_pdf(file: UploadFile = File(...)):
         text_parts.append(f"=== Page {i+1} ===\n{txt}")
     out = UPLOAD_DIR / "ocr_output.txt"
     out.write_text("\n\n".join(text_parts), encoding="utf-8")
-    return FileResponse(
-        out,
-        media_type="text/plain",
-        filename="ocr_output.txt",
-    )
+    return FileResponse(out, media_type="text/plain", filename="ocr_output.txt")
 
 
 # ─── EXTRACT IMAGES ──────────────────────────────────────────────────────────
