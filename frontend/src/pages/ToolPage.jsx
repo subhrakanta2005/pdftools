@@ -12,6 +12,7 @@ export default function ToolPage({ tool, onBack }) {
   const [downloadName, setDownloadName] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef();
+  const missingRequiredFile = tool.fields.some((f) => f.type === "file" && !fields[f.name]);
 
   const handleFiles = (newFiles) => {
     if (tool.multiFile) {
@@ -41,7 +42,7 @@ export default function ToolPage({ tool, onBack }) {
         form.append("file", files[0]);
       }
       Object.entries(fields).forEach(([k, v]) => {
-        if (v) form.append(k, v);
+        if (v) form.append(k, v); // works for both text values and File objects
       });
 
       const res = await fetch(`${API}${tool.endpoint}`, { method: "POST", body: form });
@@ -170,6 +171,21 @@ export default function ToolPage({ tool, onBack }) {
                           <option key={o.value} value={o.value}>{o.label}</option>
                         ))}
                       </select>
+                    ) : field.type === "textarea" ? (
+                      <textarea
+                        value={fields[field.name]}
+                        placeholder={field.placeholder}
+                        rows={5}
+                        onChange={(e) => setFields((p) => ({ ...p, [field.name]: e.target.value }))}
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #dde", fontSize: 13, fontFamily: "monospace", outline: "none", boxSizing: "border-box", resize: "vertical" }}
+                      />
+                    ) : field.type === "file" ? (
+                      <input
+                        type="file"
+                        accept={field.accepts}
+                        onChange={(e) => setFields((p) => ({ ...p, [field.name]: e.target.files[0] || "" }))}
+                        style={{ width: "100%", fontSize: 14 }}
+                      />
                     ) : (
                       <input
                         type={field.type}
@@ -192,17 +208,17 @@ export default function ToolPage({ tool, onBack }) {
 
             <button
               onClick={handleSubmit}
-              disabled={files.length === 0 || status === "uploading"}
+              disabled={files.length === 0 || missingRequiredFile || status === "uploading"}
               style={{
                 width: "100%",
                 padding: "16px",
                 borderRadius: 12,
                 border: "none",
-                background: files.length === 0 ? "#ccc" : tool.color,
+                background: files.length === 0 || missingRequiredFile ? "#ccc" : tool.color,
                 color: "#fff",
                 fontSize: 16,
                 fontWeight: 700,
-                cursor: files.length === 0 ? "not-allowed" : "pointer",
+                cursor: files.length === 0 || missingRequiredFile ? "not-allowed" : "pointer",
                 transition: "all 0.15s",
               }}
             >
