@@ -41,6 +41,10 @@ PLAN_LIMITS = {
 PAID_ONLY_TOOLS = {
     "ocr", "pdf-to-pptx", "pdf-to-excel",
     "word-to-pdf", "excel-to-pdf", "pptx-to-pdf", "html-to-pdf",
+    # Advanced tools added alongside redact/sign/edit/compare/repair/PDF-A —
+    # gated behind Pro since they're the highest-effort builds. Move any of
+    # these into FREE_TOOLS below if you'd rather offer them to everyone.
+    "redact", "edit", "sign", "compare", "repair", "pdf-to-pdfa",
 }
 
 # Every tool id used by main.py must be listed here so check_tool_access has a
@@ -50,6 +54,7 @@ FREE_TOOLS = {
     "reorder", "watermark", "protect", "unlock", "extract-text",
     "page-numbers", "pdf-to-jpg", "jpg-to-pdf", "info",
     "crop", "pdf-to-word", "extract-images",
+    "scan-to-pdf",
 }
 
 
