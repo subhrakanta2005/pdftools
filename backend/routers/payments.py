@@ -78,6 +78,11 @@ async def verify_payment(body: VerifyRequest, user=Depends(get_current_user)):
     if not RAZORPAY_KEY_SECRET:
         raise HTTPException(501, "Razorpay not configured")
 
+    if body.plan not in PLAN_PRICES:
+        raise HTTPException(400, "Invalid plan")
+    if body.billing not in ("monthly", "yearly"):
+        raise HTTPException(400, "Invalid billing cycle")
+
     # Verify signature
     expected = hmac.new(
         RAZORPAY_KEY_SECRET.encode(),
@@ -129,10 +134,15 @@ async def razorpay_webhook(request: Request):
     sig = request.headers.get("X-Razorpay-Signature", "")
 
     webhook_secret = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
-    if webhook_secret:
-        expected = hmac.new(webhook_secret.encode(), payload, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, sig):
-            raise HTTPException(400, "Invalid webhook signature")
+    if not webhook_secret:
+        # Refuse to process unsigned webhooks rather than silently trusting
+        # whatever hits this endpoint — anyone could POST a fake
+        # "payment.captured" event and grant themselves a paid plan.
+        raise HTTPException(501, "Webhook secret not configured")
+
+    expected = hmac.new(webhook_secret.encode(), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        raise HTTPException(400, "Invalid webhook signature")
 
     event = json.loads(payload)
     event_type = event.get("event")

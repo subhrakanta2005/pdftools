@@ -4,8 +4,10 @@ from typing import Optional
 
 import httpx
 from bson import ObjectId
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from ..core.config import settings
 from ..core.database import get_db
@@ -20,6 +22,12 @@ from ..core.security import (
 from ..models.user import UserLogin, UserOut, UserRegister
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Simple in-process rate limiter for brute-force-prone endpoints. Note: this
+# is per-worker, not shared across multiple server processes/instances — fine
+# for a single Render web service, but if you scale to multiple instances
+# behind a load balancer, swap the storage_uri for a shared Redis backend.
+limiter = Limiter(key_func=get_remote_address)
 
 COOKIE_OPTS = dict(
     httponly=True,
@@ -52,7 +60,8 @@ def _user_out(user: dict) -> dict:
 
 # ─── REGISTER ────────────────────────────────────────────────────────────────
 @router.post("/register")
-async def register(body: UserRegister, response: Response):
+@limiter.limit("5/minute")
+async def register(request: Request, body: UserRegister, response: Response):
     db = get_db()
     existing = await db.users.find_one({"email": body.email})
     if existing:
@@ -76,7 +85,8 @@ async def register(body: UserRegister, response: Response):
 
 # ─── LOGIN ───────────────────────────────────────────────────────────────────
 @router.post("/login")
-async def login(body: UserLogin, response: Response):
+@limiter.limit("10/minute")
+async def login(request: Request, body: UserLogin, response: Response):
     db = get_db()
     user = await db.users.find_one({"email": body.email})
     if not user or not user.get("password_hash"):
@@ -90,7 +100,26 @@ async def login(body: UserLogin, response: Response):
 
 # ─── LOGOUT ──────────────────────────────────────────────────────────────────
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(response: Response, refresh_token: Optional[str] = Cookie(None)):
+    # Actually revoke the refresh token server-side, not just clear the
+    # cookie — otherwise a copied/leaked refresh token keeps working for up
+    # to 7 days after the user thinks they've logged out.
+    if refresh_token:
+        payload = decode_token(refresh_token)
+        db = get_db()
+        expires_at = (
+            datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+            if payload and "exp" in payload
+            else datetime.now(timezone.utc) + timedelta(days=7)
+        )
+        try:
+            await db.token_blacklist.insert_one({
+                "token": refresh_token,
+                "expires_at": expires_at,
+            })
+        except Exception:
+            pass  # already blacklisted or DB hiccup — cookie clear still happens below
+
     response.delete_cookie("access_token")
     response.delete_cookie("refresh_token")
     return {"detail": "Logged out"}
