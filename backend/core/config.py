@@ -26,6 +26,12 @@ class Settings:
     RAZORPAY_WEBHOOK_SECRET: str = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
 
+    # Brevo (transactional email) — used for password reset emails.
+    BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
+    BREVO_SENDER_EMAIL: str = os.getenv("BREVO_SENDER_EMAIL", "")
+    BREVO_SENDER_NAME: str = os.getenv("BREVO_SENDER_NAME", "PDFTools")
+    PASSWORD_RESET_EXPIRE_MINUTES: int = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
+
     # Default to the safe choice; only relax when explicitly told to (local dev).
     COOKIE_SECURE: bool = os.getenv("COOKIE_SECURE", "true").lower() == "true"
     # Frontend (Vercel) and backend (Render) live on different domains, so cookies
@@ -53,3 +59,8 @@ if _IS_PROD:
         msg = "Refusing to start in production with insecure configuration:\n- " + "\n- ".join(problems)
         print(f"❌ {msg}", file=sys.stderr)
         raise SystemExit(msg)
+
+    # Non-fatal: password reset emails just won't send if this is missing,
+    # rather than the whole app being unusable, so this is a warning not a hard fail.
+    if not settings.BREVO_API_KEY or not settings.BREVO_SENDER_EMAIL:
+        print("⚠️  BREVO_API_KEY / BREVO_SENDER_EMAIL not set — password reset emails will not be sent.", file=sys.stderr)

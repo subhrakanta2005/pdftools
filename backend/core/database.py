@@ -17,6 +17,9 @@ async def connect_db():
     # (token_blacklist) — it needs its own TTL index or it grows forever.
     await db.token_blacklist.create_index("token", unique=True)
     await db.token_blacklist.create_index("expires_at", expireAfterSeconds=0)
+    # Password reset tokens — same TTL-cleanup pattern as token_blacklist.
+    await db.password_resets.create_index("token_hash", unique=True)
+    await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
     print("✅ MongoDB connected")
 
 
