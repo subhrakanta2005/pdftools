@@ -1,38 +1,48 @@
-import os
 import io
-import json
+import logging
+import os
 import shutil
-import tempfile
-import zipfile
 import subprocess
+import tempfile
+import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
-from .core.database import connect_db, close_db
+from .core.database import connect_db, close_db, get_db
 from .core.config import settings
 from .core.deps import get_optional_user
-from .core.limits import check_file_size, check_tool_access, check_and_increment_ops
+from .core.limits import check_file_size, check_tool_access, check_and_increment_ops, get_limits
 from .core.background import start_background_tasks, cleanup_temp_files
 from .routers import auth as auth_router
 from .routers import payments as payments_router
+from .routers.auth import limiter
+
+logger = logging.getLogger("pdftools")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_db()
-    await cleanup_temp_files()  # clean stale files on startup
+    await cleanup_temp_files()  # clean stale files/dirs left over from a crash
     app_url = os.getenv("RENDER_EXTERNAL_URL", "")
     start_background_tasks(app_url)
     yield
     await close_db()
 
 
-app = FastAPI(title="PDFTools API", version="2.0", lifespan=lifespan)
+app = FastAPI(title="PDFTools API", version="2.1", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,284 +59,265 @@ UPLOAD_DIR = Path(tempfile.gettempdir()) / "pdftools"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 
-async def save_upload_checked(file: UploadFile, user=None, tool_id: str = "") -> Path:
-    """Save upload after checking file size, tool access, and rate limits."""
-    data = await file.read()
-    await check_file_size(len(data), user)
+# ─── SHARED HELPERS ───────────────────────────────────────────────────────────
+
+def sanitize_filename(name: Optional[str]) -> str:
+    """Strip any directory components so a crafted filename (e.g.
+    '../../etc/passwd' or an absolute path) can never escape the work dir."""
+    base = Path(name or "file").name
+    return base or "file"
+
+
+def new_work_dir() -> Path:
+    """A fresh, isolated directory per request. Only used by the LibreOffice
+    tools, which need real file paths on disk — everything else stays in
+    memory and never touches the filesystem at all."""
+    return Path(tempfile.mkdtemp(dir=UPLOAD_DIR, prefix=f"{uuid.uuid4().hex}_"))
+
+
+async def _read_capped(file: UploadFile, cap: int) -> bytes:
+    """Read an upload in chunks, aborting as soon as it exceeds the hard
+    ceiling — avoids buffering an arbitrarily large body into memory before
+    the plan-based size check even gets a chance to run."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                413, f"File exceeds the maximum allowed upload size ({cap // (1024 * 1024)} MB)."
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _apply_checks(size: int, user, tool_id: str):
+    await check_file_size(size, user)
     await check_tool_access(tool_id, user)
-    db_ref = None
-    try:
-        from .core.database import get_db
-        db_ref = get_db()
-    except Exception:
-        pass
+    db_ref = get_db()
     if db_ref is not None:
         await check_and_increment_ops(user, db_ref, tool_id)
-    dest = UPLOAD_DIR / file.filename
+
+
+async def intake_bytes(file: UploadFile, user, tool_id: str) -> bytes:
+    """Validate + read a single upload fully into memory. Used by every tool
+    that can operate on bytes directly (pypdf/fitz/pdfplumber/etc.) — no
+    filesystem interaction, so there's nothing for a crafted filename to do."""
+    data = await _read_capped(file, settings.MAX_UPLOAD_BYTES)
+    await _apply_checks(len(data), user, tool_id)
+    return data
+
+
+async def intake_bytes_many(files: List[UploadFile], user, tool_id: str) -> List[Tuple[str, bytes]]:
+    """Same as intake_bytes() but validates the TOTAL size across all files
+    (the original code only checked the first file in a multi-upload)."""
+    items = []
+    total = 0
+    for f in files:
+        data = await _read_capped(f, settings.MAX_UPLOAD_BYTES)
+        total += len(data)
+        if total > settings.MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "Combined upload size is too large.")
+        items.append((sanitize_filename(f.filename), data))
+    await _apply_checks(total, user, tool_id)
+    return items
+
+
+async def intake_to_file(file: UploadFile, user, tool_id: str, work_dir: Path) -> Path:
+    """Only for tools whose external process (LibreOffice/wkhtmltopdf) needs
+    an actual file path. Filename is sanitized and written inside an
+    isolated per-request directory."""
+    data = await _read_capped(file, settings.MAX_UPLOAD_BYTES)
+    await _apply_checks(len(data), user, tool_id)
+    dest = work_dir / sanitize_filename(file.filename)
     dest.write_bytes(data)
     return dest
 
 
-def stream_file(path: Path, media_type: str = "application/pdf", filename: str = None):
-    filename = filename or path.name
-    return FileResponse(
-        path,
-        media_type=media_type,
-        filename=filename,
+def pdf_response(data: bytes, filename: str) -> StreamingResponse:
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
-def save_upload(file: UploadFile) -> Path:
-    """Sync helper for endpoints not yet using auth checks."""
-    dest = UPLOAD_DIR / file.filename
-    dest.write_bytes(file.file.read())
-    return dest
+def file_response(data: bytes, media_type: str, filename: str) -> StreamingResponse:
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
-# ─── MERGE ──────────────────────────────────────────────────────────────────
-@app.post("/merge")
-async def merge_pdfs(files: List[UploadFile] = File(...), user=Depends(get_optional_user)):
+def zip_response(data: bytes, filename: str) -> StreamingResponse:
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── SYNC PROCESSING (run off the event loop via run_in_threadpool) ──────────
+
+def _merge_sync(blobs: List[bytes]) -> bytes:
     from pypdf import PdfWriter, PdfReader
     writer = PdfWriter()
-    for i, f in enumerate(files):
-        data = await f.read()
-        if i == 0:
-            await check_file_size(len(data), user)
-            await check_tool_access("merge", user)
-            try:
-                from .core.database import get_db
-                await check_and_increment_ops(user, get_db(), "merge")
-            except Exception:
-                pass
-        path = UPLOAD_DIR / f.filename
-        path.write_bytes(data)
-        reader = PdfReader(str(path))
+    for data in blobs:
+        reader = PdfReader(io.BytesIO(data))
         for page in reader.pages:
             writer.add_page(page)
-    out = UPLOAD_DIR / "merged.pdf"
-    with open(out, "wb") as fp:
-        writer.write(fp)
-    return stream_file(out, filename="merged.pdf")
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-# ─── SPLIT ──────────────────────────────────────────────────────────────────
-@app.post("/split")
-async def split_pdf(file: UploadFile = File(...), pages: str = Form(...)):
-    from pypdf import PdfReader, PdfWriter
-    path = save_upload(file)
-    reader = PdfReader(str(path))
-    total = len(reader.pages)
-
-    # Parse page ranges e.g. "1-3,5,7-9"
+def _parse_ranges(spec: str, total: int) -> set:
     selected = set()
-    for part in pages.split(","):
+    for part in spec.split(","):
         part = part.strip()
+        if not part:
+            continue
         if "-" in part:
             a, b = part.split("-")
             selected.update(range(int(a) - 1, min(int(b), total)))
         else:
             selected.add(int(part) - 1)
+    return selected
 
+
+def _split_sync(data: bytes, pages: str) -> bytes:
+    from pypdf import PdfReader, PdfWriter
+    reader = PdfReader(io.BytesIO(data))
+    total = len(reader.pages)
+    selected = _parse_ranges(pages, total)
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as zf:
-        for i, idx in enumerate(sorted(selected)):
+        for idx in sorted(selected):
             if 0 <= idx < total:
                 writer = PdfWriter()
                 writer.add_page(reader.pages[idx])
                 buf = io.BytesIO()
                 writer.write(buf)
-                zf.writestr(f"page_{idx+1}.pdf", buf.getvalue())
-    zip_buf.seek(0)
-    return StreamingResponse(
-        zip_buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="split_pages.zip"'},
-    )
+                zf.writestr(f"page_{idx + 1}.pdf", buf.getvalue())
+    return zip_buf.getvalue()
 
 
-# ─── COMPRESS ────────────────────────────────────────────────────────────────
-@app.post("/compress")
-async def compress_pdf(file: UploadFile = File(...)):
+def _compress_sync(data: bytes) -> bytes:
     import fitz
-    path = save_upload(file)
-    out = UPLOAD_DIR / "compressed.pdf"
-    doc = fitz.open(str(path))
-    doc.save(str(out), deflate=True, garbage=4, clean=True)
+    doc = fitz.open(stream=data, filetype="pdf")
+    out = doc.tobytes(deflate=True, garbage=4, clean=True)
     doc.close()
-    return stream_file(out, filename="compressed.pdf")
+    return out
 
 
-# ─── ROTATE ──────────────────────────────────────────────────────────────────
-@app.post("/rotate")
-async def rotate_pdf(file: UploadFile = File(...), angle: int = Form(90)):
+def _rotate_sync(data: bytes, angle: int) -> bytes:
     from pypdf import PdfReader, PdfWriter
-    path = save_upload(file)
-    reader = PdfReader(str(path))
+    reader = PdfReader(io.BytesIO(data))
     writer = PdfWriter()
     for page in reader.pages:
         page.rotate(angle)
         writer.add_page(page)
-    out = UPLOAD_DIR / "rotated.pdf"
-    with open(out, "wb") as fp:
-        writer.write(fp)
-    return stream_file(out, filename="rotated.pdf")
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-# ─── REMOVE PAGES ────────────────────────────────────────────────────────────
-@app.post("/remove-pages")
-async def remove_pages(file: UploadFile = File(...), pages: str = Form(...)):
+def _remove_pages_sync(data: bytes, pages: str) -> bytes:
     from pypdf import PdfReader, PdfWriter
-    path = save_upload(file)
-    reader = PdfReader(str(path))
+    reader = PdfReader(io.BytesIO(data))
     total = len(reader.pages)
-
-    to_remove = set()
-    for part in pages.split(","):
-        part = part.strip()
-        if "-" in part:
-            a, b = part.split("-")
-            to_remove.update(range(int(a) - 1, min(int(b), total)))
-        else:
-            to_remove.add(int(part) - 1)
-
+    to_remove = _parse_ranges(pages, total)
     writer = PdfWriter()
     for i, page in enumerate(reader.pages):
         if i not in to_remove:
             writer.add_page(page)
-
-    out = UPLOAD_DIR / "removed_pages.pdf"
-    with open(out, "wb") as fp:
-        writer.write(fp)
-    return stream_file(out, filename="removed_pages.pdf")
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-# ─── REORDER / ORGANIZE PAGES ────────────────────────────────────────────────
-@app.post("/reorder")
-async def reorder_pages(file: UploadFile = File(...), order: str = Form(...)):
+def _reorder_sync(data: bytes, order: str) -> bytes:
     from pypdf import PdfReader, PdfWriter
-    path = save_upload(file)
-    reader = PdfReader(str(path))
-    indices = [int(x.strip()) - 1 for x in order.split(",")]
+    reader = PdfReader(io.BytesIO(data))
+    indices = [int(x.strip()) - 1 for x in order.split(",") if x.strip()]
     writer = PdfWriter()
     for idx in indices:
         if 0 <= idx < len(reader.pages):
             writer.add_page(reader.pages[idx])
-    out = UPLOAD_DIR / "reordered.pdf"
-    with open(out, "wb") as fp:
-        writer.write(fp)
-    return stream_file(out, filename="reordered.pdf")
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-# ─── CROP ────────────────────────────────────────────────────────────────────
-@app.post("/crop")
-async def crop_pdf(
-    file: UploadFile = File(...),
-    x1: float = Form(0), y1: float = Form(0),
-    x2: float = Form(595), y2: float = Form(842),
-):
+def _crop_sync(data: bytes, x1: float, y1: float, x2: float, y2: float) -> bytes:
     import fitz
-    path = save_upload(file)
-    doc = fitz.open(str(path))
+    doc = fitz.open(stream=data, filetype="pdf")
     out_doc = fitz.open()
     clip = fitz.Rect(x1, y1, x2, y2)
     for page in doc:
         page.set_cropbox(clip)
         out_doc.insert_pdf(doc, from_page=page.number, to_page=page.number)
-    out = UPLOAD_DIR / "cropped.pdf"
-    out_doc.save(str(out))
+    result = out_doc.tobytes()
     out_doc.close()
-    return stream_file(out, filename="cropped.pdf")
+    doc.close()
+    return result
 
 
-# ─── WATERMARK ───────────────────────────────────────────────────────────────
-@app.post("/watermark")
-async def watermark_pdf(
-    file: UploadFile = File(...),
-    text: str = Form("WATERMARK"),
-    opacity: float = Form(0.3),
-):
+def _watermark_sync(data: bytes, text: str, opacity: float) -> bytes:
     import fitz
-    path = save_upload(file)
-    doc = fitz.open(str(path))
+    doc = fitz.open(stream=data, filetype="pdf")
     for page in doc:
         w, h = page.rect.width, page.rect.height
         page.insert_text(
-            fitz.Point(w * 0.15, h * 0.55),
-            text,
-            fontsize=60,
-            color=(0.5, 0.5, 0.5),
-            rotate=45,
-            overlay=True,
+            fitz.Point(w * 0.15, h * 0.55), text, fontsize=60,
+            color=(0.5, 0.5, 0.5), rotate=45, overlay=True,
         )
-    out = UPLOAD_DIR / "watermarked.pdf"
-    doc.save(str(out))
-    return stream_file(out, filename="watermarked.pdf")
+    result = doc.tobytes()
+    doc.close()
+    return result
 
 
-# ─── PROTECT ────────────────────────────────────────────────────────────────
-@app.post("/protect")
-async def protect_pdf(file: UploadFile = File(...), password: str = Form(...)):
+def _protect_sync(data: bytes, password: str) -> bytes:
     from pypdf import PdfReader, PdfWriter
-    path = save_upload(file)
-    reader = PdfReader(str(path))
+    reader = PdfReader(io.BytesIO(data))
     writer = PdfWriter()
     for page in reader.pages:
         writer.add_page(page)
     writer.encrypt(password)
-    out = UPLOAD_DIR / "protected.pdf"
-    with open(out, "wb") as fp:
-        writer.write(fp)
-    return stream_file(out, filename="protected.pdf")
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-# ─── UNLOCK ─────────────────────────────────────────────────────────────────
-@app.post("/unlock")
-async def unlock_pdf(file: UploadFile = File(...), password: str = Form(...)):
+def _unlock_sync(data: bytes, password: str) -> bytes:
     from pypdf import PdfReader, PdfWriter
-    path = save_upload(file)
-    reader = PdfReader(str(path))
+    reader = PdfReader(io.BytesIO(data))
     if reader.is_encrypted:
         reader.decrypt(password)
     writer = PdfWriter()
     for page in reader.pages:
         writer.add_page(page)
-    out = UPLOAD_DIR / "unlocked.pdf"
-    with open(out, "wb") as fp:
-        writer.write(fp)
-    return stream_file(out, filename="unlocked.pdf")
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-# ─── EXTRACT TEXT ───────────────────────────────────────────────────────────
-@app.post("/extract-text")
-async def extract_text(file: UploadFile = File(...)):
+def _extract_text_sync(data: bytes) -> bytes:
     import pdfplumber
-    path = save_upload(file)
     text_parts = []
-    with pdfplumber.open(str(path)) as pdf:
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
         for i, page in enumerate(pdf.pages):
-            text_parts.append(f"=== Page {i+1} ===\n{page.extract_text() or ''}")
-    full_text = "\n\n".join(text_parts)
-    out = UPLOAD_DIR / "extracted_text.txt"
-    out.write_text(full_text, encoding="utf-8")
-    return FileResponse(
-        out,
-        media_type="text/plain",
-        filename="extracted_text.txt",
-        headers={"Content-Disposition": 'attachment; filename="extracted_text.txt"'},
-    )
+            text_parts.append(f"=== Page {i + 1} ===\n{page.extract_text() or ''}")
+    return "\n\n".join(text_parts).encode("utf-8")
 
 
-# ─── ADD PAGE NUMBERS ────────────────────────────────────────────────────────
-@app.post("/page-numbers")
-async def add_page_numbers(
-    file: UploadFile = File(...),
-    position: str = Form("bottom-center"),
-    start: int = Form(1),
-):
+def _page_numbers_sync(data: bytes, position: str, start: int) -> bytes:
     import fitz
-    path = save_upload(file)
-    doc = fitz.open(str(path))
+    doc = fitz.open(stream=data, filetype="pdf")
     for i, page in enumerate(doc):
         num = start + i
         w, h = page.rect.width, page.rect.height
@@ -339,82 +330,63 @@ async def add_page_numbers(
         else:
             pt = fitz.Point(20, h - 20)
         page.insert_text(pt, str(num), fontsize=11, color=(0, 0, 0))
-    out = UPLOAD_DIR / "numbered.pdf"
-    doc.save(str(out))
-    return stream_file(out, filename="numbered.pdf")
+    result = doc.tobytes()
+    doc.close()
+    return result
 
 
-# ─── PDF → JPG ───────────────────────────────────────────────────────────────
-@app.post("/pdf-to-jpg")
-async def pdf_to_jpg(file: UploadFile = File(...), dpi: int = Form(150)):
+def _pdf_to_jpg_sync(data: bytes, dpi: int) -> bytes:
     import fitz
-    path = save_upload(file)
-    doc = fitz.open(str(path))
+    doc = fitz.open(stream=data, filetype="pdf")
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as zf:
         for i, page in enumerate(doc):
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             pix = page.get_pixmap(matrix=mat)
-            zf.writestr(f"page_{i+1}.jpg", pix.tobytes("jpeg"))
-    zip_buf.seek(0)
-    return StreamingResponse(
-        zip_buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="pdf_pages.zip"'},
-    )
+            zf.writestr(f"page_{i + 1}.jpg", pix.tobytes("jpeg"))
+    doc.close()
+    return zip_buf.getvalue()
 
 
-# ─── JPG → PDF ───────────────────────────────────────────────────────────────
-@app.post("/jpg-to-pdf")
-async def jpg_to_pdf(files: List[UploadFile] = File(...)):
+def _jpg_to_pdf_sync(items: List[Tuple[str, bytes]]) -> bytes:
     import fitz
     doc = fitz.open()
-    for f in files:
-        path = save_upload(f)
-        img_doc = fitz.open(str(path))
-        rect = img_doc[0].rect
+    for name, data in items:
+        ext = Path(name).suffix.lstrip(".").lower() or "jpg"
+        img_doc = fitz.open(stream=data, filetype=ext)
         pdfbytes = img_doc.convert_to_pdf()
         img_doc.close()
         img_pdf = fitz.open("pdf", pdfbytes)
         doc.insert_pdf(img_pdf)
-    out = UPLOAD_DIR / "images.pdf"
-    doc.save(str(out))
-    return stream_file(out, filename="images.pdf")
+        img_pdf.close()
+    result = doc.tobytes()
+    doc.close()
+    return result
 
 
-# ─── PDF → WORD ──────────────────────────────────────────────────────────────
-@app.post("/pdf-to-word")
-async def pdf_to_word(file: UploadFile = File(...)):
+def _pdf_to_word_sync(data: bytes) -> bytes:
     import pdfplumber
     from docx import Document
-    path = save_upload(file)
     doc = Document()
     doc.add_heading("Extracted from PDF", 0)
-    with pdfplumber.open(str(path)) as pdf:
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
         for i, page in enumerate(pdf.pages):
-            doc.add_heading(f"Page {i+1}", level=1)
+            doc.add_heading(f"Page {i + 1}", level=1)
             text = page.extract_text() or ""
             for line in text.split("\n"):
                 doc.add_paragraph(line)
-    out = UPLOAD_DIR / "converted.docx"
-    doc.save(str(out))
-    return FileResponse(
-        out,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename="converted.docx",
-    )
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
-# ─── PDF → EXCEL ─────────────────────────────────────────────────────────────
-@app.post("/pdf-to-excel")
-async def pdf_to_excel(file: UploadFile = File(...)):
+def _pdf_to_excel_sync(data: bytes) -> bytes:
     import pdfplumber
     import openpyxl
-    path = save_upload(file)
     wb = openpyxl.Workbook()
-    with pdfplumber.open(str(path)) as pdf:
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
         for i, page in enumerate(pdf.pages):
-            ws = wb.create_sheet(title=f"Page {i+1}")
+            ws = wb.create_sheet(title=f"Page {i + 1}")
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -426,143 +398,86 @@ async def pdf_to_excel(file: UploadFile = File(...)):
                     ws.append([line])
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
-    out = UPLOAD_DIR / "converted.xlsx"
-    wb.save(str(out))
-    return FileResponse(
-        out,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="converted.xlsx",
-    )
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
-# ─── PDF → POWERPOINT ────────────────────────────────────────────────────────
-@app.post("/pdf-to-pptx")
-async def pdf_to_pptx(file: UploadFile = File(...)):
+def _pdf_to_pptx_sync(data: bytes) -> bytes:
     import fitz
     from pptx import Presentation
-    from pptx.util import Inches, Pt
-    path = save_upload(file)
-    doc = fitz.open(str(path))
+    from pptx.util import Inches
+    doc = fitz.open(stream=data, filetype="pdf")
     prs = Presentation()
     prs.slide_width = Inches(10)
     prs.slide_height = Inches(7.5)
     blank_layout = prs.slide_layouts[6]
-    for i, page in enumerate(doc):
+    for page in doc:
         mat = fitz.Matrix(1.5, 1.5)
         pix = page.get_pixmap(matrix=mat)
-        img_path = UPLOAD_DIR / f"slide_{i}.png"
-        pix.save(str(img_path))
+        img_buf = io.BytesIO(pix.tobytes("png"))
         slide = prs.slides.add_slide(blank_layout)
-        slide.shapes.add_picture(str(img_path), 0, 0, prs.slide_width, prs.slide_height)
-    out = UPLOAD_DIR / "converted.pptx"
-    prs.save(str(out))
-    return FileResponse(
-        out,
-        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        filename="converted.pptx",
-    )
+        slide.shapes.add_picture(img_buf, 0, 0, prs.slide_width, prs.slide_height)
+    doc.close()
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
 
 
-# ─── WORD → PDF ──────────────────────────────────────────────────────────────
-@app.post("/word-to-pdf")
-async def word_to_pdf(file: UploadFile = File(...)):
-    path = save_upload(file)
+def _libreoffice_to_pdf_sync(work_dir: Path, input_path: Path) -> bytes:
     result = subprocess.run(
-        ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(UPLOAD_DIR), str(path)],
-        capture_output=True, text=True, timeout=60
+        ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(work_dir), str(input_path)],
+        capture_output=True, text=True, timeout=60,
     )
-    out_name = path.stem + ".pdf"
-    out = UPLOAD_DIR / out_name
+    out = work_dir / (input_path.stem + ".pdf")
     if not out.exists():
-        raise HTTPException(500, f"Conversion failed: {result.stderr}")
-    return stream_file(out, filename="converted.pdf")
+        logger.error("LibreOffice conversion failed: %s", result.stderr)
+        raise HTTPException(500, "Conversion failed. Please check the uploaded file and try again.")
+    return out.read_bytes()
 
 
-# ─── EXCEL → PDF ─────────────────────────────────────────────────────────────
-@app.post("/excel-to-pdf")
-async def excel_to_pdf(file: UploadFile = File(...)):
-    path = save_upload(file)
+def _html_to_pdf_sync(work_dir: Path, input_path: Path) -> bytes:
     result = subprocess.run(
-        ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(UPLOAD_DIR), str(path)],
-        capture_output=True, text=True, timeout=60
+        ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(work_dir), str(input_path)],
+        capture_output=True, text=True, timeout=60,
     )
-    out_name = path.stem + ".pdf"
-    out = UPLOAD_DIR / out_name
-    if not out.exists():
-        raise HTTPException(500, f"Conversion failed: {result.stderr}")
-    return stream_file(out, filename="converted.pdf")
+    out = work_dir / (input_path.stem + ".pdf")
+    if out.exists():
+        return out.read_bytes()
 
-
-# ─── PPTX → PDF ──────────────────────────────────────────────────────────────
-@app.post("/pptx-to-pdf")
-async def pptx_to_pdf(file: UploadFile = File(...)):
-    path = save_upload(file)
-    result = subprocess.run(
-        ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(UPLOAD_DIR), str(path)],
-        capture_output=True, text=True, timeout=60
+    out2 = work_dir / "converted.pdf"
+    result2 = subprocess.run(
+        ["wkhtmltopdf", str(input_path), str(out2)],
+        capture_output=True, text=True, timeout=60,
     )
-    out_name = path.stem + ".pdf"
-    out = UPLOAD_DIR / out_name
-    if not out.exists():
-        raise HTTPException(500, f"Conversion failed: {result.stderr}")
-    return stream_file(out, filename="converted.pdf")
+    if not out2.exists():
+        logger.error("HTML to PDF conversion failed: %s / %s", result.stderr, result2.stderr)
+        raise HTTPException(500, "HTML to PDF conversion failed.")
+    return out2.read_bytes()
 
 
-# ─── HTML → PDF ──────────────────────────────────────────────────────────────
-@app.post("/html-to-pdf")
-async def html_to_pdf(file: UploadFile = File(...)):
-    path = save_upload(file)
-    out = UPLOAD_DIR / "converted.pdf"
-    result = subprocess.run(
-        ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(UPLOAD_DIR), str(path)],
-        capture_output=True, text=True, timeout=60
-    )
-    out_name = path.stem + ".pdf"
-    out = UPLOAD_DIR / out_name
-    if not out.exists():
-        # fallback: wkhtmltopdf if available
-        result2 = subprocess.run(
-            ["wkhtmltopdf", str(path), str(UPLOAD_DIR / "converted.pdf")],
-            capture_output=True, text=True, timeout=60
-        )
-        out = UPLOAD_DIR / "converted.pdf"
-        if not out.exists():
-            raise HTTPException(500, "HTML to PDF conversion failed")
-    return stream_file(out, filename="converted.pdf")
-
-
-# ─── OCR ────────────────────────────────────────────────────────────────────
-@app.post("/ocr")
-async def ocr_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+def _ocr_sync(data: bytes, page_limit: Optional[int]) -> bytes:
     import fitz
     import pytesseract
     from PIL import Image
-    from .core.limits import get_limits
-    path = await save_upload_checked(file, user, "ocr")
-    limits = get_limits(user)
-    page_limit = limits["ocr_page_limit"]
-    doc = fitz.open(str(path))
+    doc = fitz.open(stream=data, filetype="pdf")
     text_parts = []
     for i, page in enumerate(doc):
         if page_limit is not None and i >= page_limit:
-            text_parts.append(f"=== Page {i+1} === [upgrade to Pro to OCR all pages]")
+            text_parts.append(f"=== Page {i + 1} === [upgrade to Pro to OCR all pages]")
             continue
         mat = fitz.Matrix(2, 2)
         pix = page.get_pixmap(matrix=mat)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         txt = pytesseract.image_to_string(img)
-        text_parts.append(f"=== Page {i+1} ===\n{txt}")
-    out = UPLOAD_DIR / "ocr_output.txt"
-    out.write_text("\n\n".join(text_parts), encoding="utf-8")
-    return FileResponse(out, media_type="text/plain", filename="ocr_output.txt")
+        text_parts.append(f"=== Page {i + 1} ===\n{txt}")
+    doc.close()
+    return "\n\n".join(text_parts).encode("utf-8")
 
 
-# ─── EXTRACT IMAGES ──────────────────────────────────────────────────────────
-@app.post("/extract-images")
-async def extract_images(file: UploadFile = File(...)):
+def _extract_images_sync(data: bytes) -> bytes:
     import fitz
-    path = save_upload(file)
-    doc = fitz.open(str(path))
+    doc = fitz.open(stream=data, filetype="pdf")
     zip_buf = io.BytesIO()
     count = 0
     with zipfile.ZipFile(zip_buf, "w") as zf:
@@ -570,24 +485,17 @@ async def extract_images(file: UploadFile = File(...)):
             for j, img_info in enumerate(page.get_images(full=True)):
                 xref = img_info[0]
                 base_image = doc.extract_image(xref)
-                zf.writestr(f"page{i+1}_img{j+1}.{base_image['ext']}", base_image["image"])
+                zf.writestr(f"page{i + 1}_img{j + 1}.{base_image['ext']}", base_image["image"])
                 count += 1
+    doc.close()
     if count == 0:
         raise HTTPException(404, "No images found in PDF")
-    zip_buf.seek(0)
-    return StreamingResponse(
-        zip_buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="extracted_images.zip"'},
-    )
+    return zip_buf.getvalue()
 
 
-# ─── PAGE COUNT / INFO ───────────────────────────────────────────────────────
-@app.post("/info")
-async def pdf_info(file: UploadFile = File(...)):
+def _info_sync(data: bytes) -> dict:
     from pypdf import PdfReader
-    path = save_upload(file)
-    reader = PdfReader(str(path))
+    reader = PdfReader(io.BytesIO(data))
     meta = reader.metadata or {}
     return {
         "pages": len(reader.pages),
@@ -597,6 +505,219 @@ async def pdf_info(file: UploadFile = File(...)):
         "creator": meta.get("/Creator", ""),
         "encrypted": reader.is_encrypted,
     }
+
+
+# ─── ROUTES ───────────────────────────────────────────────────────────────────
+
+@app.post("/merge")
+async def merge_pdfs(files: List[UploadFile] = File(...), user=Depends(get_optional_user)):
+    items = await intake_bytes_many(files, user, "merge")
+    result = await run_in_threadpool(_merge_sync, [data for _, data in items])
+    return pdf_response(result, "merged.pdf")
+
+
+@app.post("/split")
+async def split_pdf(file: UploadFile = File(...), pages: str = Form(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "split")
+    result = await run_in_threadpool(_split_sync, data, pages)
+    return zip_response(result, "split_pages.zip")
+
+
+@app.post("/compress")
+async def compress_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "compress")
+    result = await run_in_threadpool(_compress_sync, data)
+    return pdf_response(result, "compressed.pdf")
+
+
+@app.post("/rotate")
+async def rotate_pdf(file: UploadFile = File(...), angle: int = Form(90), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "rotate")
+    result = await run_in_threadpool(_rotate_sync, data, angle)
+    return pdf_response(result, "rotated.pdf")
+
+
+@app.post("/remove-pages")
+async def remove_pages(file: UploadFile = File(...), pages: str = Form(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "remove-pages")
+    result = await run_in_threadpool(_remove_pages_sync, data, pages)
+    return pdf_response(result, "removed_pages.pdf")
+
+
+@app.post("/reorder")
+async def reorder_pages(file: UploadFile = File(...), order: str = Form(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "reorder")
+    result = await run_in_threadpool(_reorder_sync, data, order)
+    return pdf_response(result, "reordered.pdf")
+
+
+@app.post("/crop")
+async def crop_pdf(
+    file: UploadFile = File(...),
+    x1: float = Form(0), y1: float = Form(0),
+    x2: float = Form(595), y2: float = Form(842),
+    user=Depends(get_optional_user),
+):
+    data = await intake_bytes(file, user, "crop")
+    result = await run_in_threadpool(_crop_sync, data, x1, y1, x2, y2)
+    return pdf_response(result, "cropped.pdf")
+
+
+@app.post("/watermark")
+async def watermark_pdf(
+    file: UploadFile = File(...),
+    text: str = Form("WATERMARK"),
+    opacity: float = Form(0.3),
+    user=Depends(get_optional_user),
+):
+    data = await intake_bytes(file, user, "watermark")
+    result = await run_in_threadpool(_watermark_sync, data, text, opacity)
+    return pdf_response(result, "watermarked.pdf")
+
+
+@app.post("/protect")
+async def protect_pdf(file: UploadFile = File(...), password: str = Form(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "protect")
+    result = await run_in_threadpool(_protect_sync, data, password)
+    return pdf_response(result, "protected.pdf")
+
+
+@app.post("/unlock")
+async def unlock_pdf(file: UploadFile = File(...), password: str = Form(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "unlock")
+    result = await run_in_threadpool(_unlock_sync, data, password)
+    return pdf_response(result, "unlocked.pdf")
+
+
+@app.post("/extract-text")
+async def extract_text(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "extract-text")
+    result = await run_in_threadpool(_extract_text_sync, data)
+    return file_response(result, "text/plain", "extracted_text.txt")
+
+
+@app.post("/page-numbers")
+async def add_page_numbers(
+    file: UploadFile = File(...),
+    position: str = Form("bottom-center"),
+    start: int = Form(1),
+    user=Depends(get_optional_user),
+):
+    data = await intake_bytes(file, user, "page-numbers")
+    result = await run_in_threadpool(_page_numbers_sync, data, position, start)
+    return pdf_response(result, "numbered.pdf")
+
+
+@app.post("/pdf-to-jpg")
+async def pdf_to_jpg(file: UploadFile = File(...), dpi: int = Form(150), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "pdf-to-jpg")
+    result = await run_in_threadpool(_pdf_to_jpg_sync, data, dpi)
+    return zip_response(result, "pdf_pages.zip")
+
+
+@app.post("/jpg-to-pdf")
+async def jpg_to_pdf(files: List[UploadFile] = File(...), user=Depends(get_optional_user)):
+    items = await intake_bytes_many(files, user, "jpg-to-pdf")
+    result = await run_in_threadpool(_jpg_to_pdf_sync, items)
+    return pdf_response(result, "images.pdf")
+
+
+@app.post("/pdf-to-word")
+async def pdf_to_word(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "pdf-to-word")
+    result = await run_in_threadpool(_pdf_to_word_sync, data)
+    return file_response(
+        result,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "converted.docx",
+    )
+
+
+@app.post("/pdf-to-excel")
+async def pdf_to_excel(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "pdf-to-excel")
+    result = await run_in_threadpool(_pdf_to_excel_sync, data)
+    return file_response(
+        result,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "converted.xlsx",
+    )
+
+
+@app.post("/pdf-to-pptx")
+async def pdf_to_pptx(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "pdf-to-pptx")
+    result = await run_in_threadpool(_pdf_to_pptx_sync, data)
+    return file_response(
+        result,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "converted.pptx",
+    )
+
+
+@app.post("/word-to-pdf")
+async def word_to_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    work_dir = new_work_dir()
+    try:
+        path = await intake_to_file(file, user, "word-to-pdf", work_dir)
+        result = await run_in_threadpool(_libreoffice_to_pdf_sync, work_dir, path)
+        return pdf_response(result, "converted.pdf")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/excel-to-pdf")
+async def excel_to_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    work_dir = new_work_dir()
+    try:
+        path = await intake_to_file(file, user, "excel-to-pdf", work_dir)
+        result = await run_in_threadpool(_libreoffice_to_pdf_sync, work_dir, path)
+        return pdf_response(result, "converted.pdf")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/pptx-to-pdf")
+async def pptx_to_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    work_dir = new_work_dir()
+    try:
+        path = await intake_to_file(file, user, "pptx-to-pdf", work_dir)
+        result = await run_in_threadpool(_libreoffice_to_pdf_sync, work_dir, path)
+        return pdf_response(result, "converted.pdf")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/html-to-pdf")
+async def html_to_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    work_dir = new_work_dir()
+    try:
+        path = await intake_to_file(file, user, "html-to-pdf", work_dir)
+        result = await run_in_threadpool(_html_to_pdf_sync, work_dir, path)
+        return pdf_response(result, "converted.pdf")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/ocr")
+async def ocr_pdf(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "ocr")
+    limits = get_limits(user)
+    result = await run_in_threadpool(_ocr_sync, data, limits["ocr_page_limit"])
+    return file_response(result, "text/plain", "ocr_output.txt")
+
+
+@app.post("/extract-images")
+async def extract_images(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "extract-images")
+    result = await run_in_threadpool(_extract_images_sync, data)
+    return zip_response(result, "extracted_images.zip")
+
+
+@app.post("/info")
+async def pdf_info(file: UploadFile = File(...), user=Depends(get_optional_user)):
+    data = await intake_bytes(file, user, "info")
+    return await run_in_threadpool(_info_sync, data)
 
 
 @app.get("/health")
