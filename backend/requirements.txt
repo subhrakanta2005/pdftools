@@ -8,6 +8,7 @@ python-docx
 openpyxl
 python-pptx
 Pillow
+reportlab
 pdf2image
 pytesseract
 motor
