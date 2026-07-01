@@ -12,14 +12,23 @@ from slowapi.util import get_remote_address
 from core.config import settings
 from core.database import get_db
 from core.deps import get_current_user
+from core.email import send_email
 from core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    generate_reset_token,
     hash_password,
+    hash_reset_token,
     verify_password,
 )
-from models.user import UserLogin, UserOut, UserRegister
+from models.user import (
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    UserLogin,
+    UserOut,
+    UserRegister,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -158,6 +167,90 @@ async def refresh(response: Response, refresh_token: Optional[str] = Cookie(None
 @router.get("/me")
 async def me(user=Depends(get_current_user)):
     return {"user": _user_out(user)}
+
+
+# ─── FORGOT PASSWORD ─────────────────────────────────────────────────────────
+@router.post("/forgot-password")
+@limiter.limit("5/minute")
+async def forgot_password(request: Request, body: ForgotPasswordRequest):
+    db = get_db()
+    user = await db.users.find_one({"email": body.email})
+
+    # Always return the same generic response regardless of whether the email
+    # is registered — otherwise this endpoint becomes an account-enumeration
+    # oracle (an attacker learns which emails have accounts).
+    generic_response = {
+        "detail": "If an account with that email exists, a password reset link has been sent."
+    }
+
+    if not user:
+        return generic_response
+
+    # Google-only accounts have no password to reset.
+    if user.get("provider") == "google" and not user.get("password_hash"):
+        return generic_response
+
+    raw_token, token_hash = generate_reset_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.PASSWORD_RESET_EXPIRE_MINUTES
+    )
+
+    # Only one active reset link per user — clear any previous outstanding token.
+    await db.password_resets.delete_many({"user_id": user["_id"]})
+    await db.password_resets.insert_one(
+        {
+            "user_id": user["_id"],
+            "token_hash": token_hash,
+            "expires_at": expires_at,
+            "used": False,
+        }
+    )
+
+    reset_link = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
+    await send_email(
+        to_email=user["email"],
+        to_name=user.get("name", ""),
+        subject="Reset your PDFTools password",
+        html_content=f"""
+            <p>Hi {user.get('name', '')},</p>
+            <p>We received a request to reset your PDFTools password. This link
+            expires in {settings.PASSWORD_RESET_EXPIRE_MINUTES} minutes.</p>
+            <p><a href="{reset_link}">Reset your password</a></p>
+            <p>If you didn't request this, you can safely ignore this email —
+            your password will not be changed.</p>
+        """,
+    )
+
+    return generic_response
+
+
+# ─── RESET PASSWORD ──────────────────────────────────────────────────────────
+@router.post("/reset-password")
+@limiter.limit("10/minute")
+async def reset_password(request: Request, body: ResetPasswordRequest):
+    db = get_db()
+    token_hash = hash_reset_token(body.token)
+    record = await db.password_resets.find_one({"token_hash": token_hash})
+
+    if not record or record.get("used"):
+        raise HTTPException(400, "Invalid or expired reset link")
+
+    expires_at = record["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        raise HTTPException(400, "Invalid or expired reset link")
+
+    await db.users.update_one(
+        {"_id": record["user_id"]},
+        {"$set": {"password_hash": hash_password(body.new_password)}},
+    )
+    # Mark used immediately — the TTL index eventually deletes this document,
+    # but that cleanup runs on a background sweep (not instantly), so without
+    # this flag the same link could be replayed again within that window.
+    await db.password_resets.update_one({"_id": record["_id"]}, {"$set": {"used": True}})
+
+    return {"detail": "Password reset successful. You can now log in with your new password."}
 
 
 # ─── GOOGLE OAUTH — REDIRECT ─────────────────────────────────────────────────
