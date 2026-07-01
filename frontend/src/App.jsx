@@ -8,6 +8,8 @@ import RegisterPage from "./pages/RegisterPage";
 import AuthCallbackPage from "./pages/AuthCallbackPage";
 import PricingPage from "./pages/PricingPage";
 import UserDashboard from "./pages/UserDashboard";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage";
+import ResetPasswordPage from "./pages/ResetPasswordPage";
 
 function AppInner() {
   const { loading } = useAuth();
@@ -15,6 +17,8 @@ function AppInner() {
   const [page, setPage] = useState(() => {
     if (window.location.pathname === "/auth/callback") return "callback";
     if (window.location.pathname === "/pricing") return "pricing";
+    if (window.location.pathname === "/forgot-password") return "forgot";
+    if (window.location.pathname === "/reset-password") return "reset";
     return "home";
   });
 
@@ -27,8 +31,10 @@ function AppInner() {
   }
 
   if (page === "callback") return <AuthCallbackPage onDone={() => { window.history.replaceState({}, "", "/"); setPage("home"); }} />;
-  if (page === "login") return <LoginPage onSuccess={() => setPage("home")} onSwitchToRegister={() => setPage("register")} />;
+  if (page === "login") return <LoginPage onSuccess={() => setPage("home")} onSwitchToRegister={() => setPage("register")} onForgotPassword={() => setPage("forgot")} />;
   if (page === "register") return <RegisterPage onSuccess={() => setPage("home")} onSwitchToLogin={() => setPage("login")} />;
+  if (page === "forgot") return <ForgotPasswordPage onBack={() => { window.history.replaceState({}, "", "/"); setPage("login"); }} />;
+  if (page === "reset") return <ResetPasswordPage onDone={() => { window.history.replaceState({}, "", "/"); setPage("login"); }} />;
   if (page === "pricing") return <PricingPage onBack={() => setPage("home")} onRegister={() => setPage("register")} />;
   if (page === "dashboard") return <UserDashboard onBack={() => setPage("home")} />;
   if (currentTool) return <ToolPage tool={currentTool} onBack={() => setCurrentTool(null)} />;
