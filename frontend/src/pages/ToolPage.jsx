@@ -1,4 +1,5 @@
 import { useState, useRef } from "react";
+import ThemeToggle from "../components/ThemeToggle";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -74,19 +75,19 @@ export default function ToolPage({ tool, onBack }) {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f7f8fc", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "'Inter', -apple-system, sans-serif" }}>
       {/* Nav */}
-      <nav style={{ background: "#fff", borderBottom: "1px solid #e8eaf0", padding: "0 2rem", display: "flex", alignItems: "center", height: 60, position: "sticky", top: 0, zIndex: 100 }}>
+      <nav style={{ background: "var(--nav-bg)", borderBottom: "1px solid var(--border)", padding: "0 2rem", display: "flex", alignItems: "center", height: 60, position: "sticky", top: 0, zIndex: 100 }}>
         <button
           onClick={onBack}
-          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "#666", display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 8 }}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 8 }}
         >
           ← All Tools
         </button>
-        <div style={{ flex: 1, textAlign: "center", fontWeight: 700, fontSize: 16, color: "#1a1a2e" }}>
+        <div style={{ flex: 1, textAlign: "center", fontWeight: 700, fontSize: 16, color: "var(--text-primary)" }}>
           {tool.icon} {tool.label}
         </div>
-        <div style={{ width: 120 }} />
+        <ThemeToggle />
       </nav>
 
       {/* Hero */}
