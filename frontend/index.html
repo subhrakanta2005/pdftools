@@ -10,7 +10,45 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
-      body { font-family: 'Inter', sans-serif; }
+
+      :root {
+        --bg: #f7f8fc;
+        --surface: #ffffff;
+        --surface2: #f0f0f8;
+        --border: #e8eaf0;
+        --border-strong: #d0d2dc;
+        --text-primary: #1a1a2e;
+        --text-secondary: #555;
+        --text-muted: #999;
+        --nav-bg: #ffffff;
+        --nav-border: #e8eaf0;
+        --input-bg: #ffffff;
+        --card-shadow: 0 1px 4px rgba(0,0,0,0.05);
+        --card-shadow-hover: 0 8px 24px rgba(0,0,0,0.10);
+      }
+
+      [data-theme="dark"] {
+        --bg: #0f0f17;
+        --surface: #1a1a2e;
+        --surface2: #242438;
+        --border: #2e2e4a;
+        --border-strong: #3e3e5a;
+        --text-primary: #e8e8f0;
+        --text-secondary: #a0a0bc;
+        --text-muted: #666688;
+        --nav-bg: #14141f;
+        --nav-border: #2e2e4a;
+        --input-bg: #242438;
+        --card-shadow: 0 1px 4px rgba(0,0,0,0.3);
+        --card-shadow-hover: 0 8px 24px rgba(0,0,0,0.4);
+      }
+
+      body {
+        font-family: 'Inter', sans-serif;
+        background: var(--bg);
+        color: var(--text-primary);
+        transition: background .2s, color .2s;
+      }
     </style>
   </head>
   <body>
