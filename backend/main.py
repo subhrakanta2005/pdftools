@@ -258,8 +258,24 @@ def _crop_sync(data: bytes, x1: float, y1: float, x2: float, y2: float) -> bytes
     import fitz
     doc = fitz.open(stream=data, filetype="pdf")
     out_doc = fitz.open()
-    clip = fitz.Rect(x1, y1, x2, y2)
     for page in doc:
+        # Clamp to THIS page's own rect. Two reasons this matters:
+        #  1. Frontend coordinates are Math.round()'d, which can push x2/y2
+        #     a fraction of a point past the true page size (e.g. A4's
+        #     841.92pt height rounds up to 842) — set_cropbox() rejects
+        #     even a 0.01pt overflow.
+        #  2. If the doc has mixed page sizes, a clip sized for page 1
+        #     could otherwise exceed a smaller page later in the loop.
+        pr = page.rect
+        cx1 = max(0.0, min(x1, pr.width))
+        cy1 = max(0.0, min(y1, pr.height))
+        cx2 = max(0.0, min(x2, pr.width))
+        cy2 = max(0.0, min(y2, pr.height))
+        clip = fitz.Rect(min(cx1, cx2), min(cy1, cy2), max(cx1, cx2), max(cy1, cy2))
+        # Guard against a degenerate box (e.g. a page smaller than the
+        # requested crop in both dimensions) by falling back to the full page.
+        if clip.width < 1 or clip.height < 1:
+            clip = pr
         page.set_cropbox(clip)
         out_doc.insert_pdf(doc, from_page=page.number, to_page=page.number)
     result = out_doc.tobytes()
