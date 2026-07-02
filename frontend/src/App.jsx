@@ -31,8 +31,8 @@ function AppInner() {
   }
 
   if (page === "callback") return <AuthCallbackPage onDone={() => { window.history.replaceState({}, "", "/"); setPage("home"); }} />;
-  if (page === "login") return <LoginPage onSuccess={() => setPage("home")} onSwitchToRegister={() => setPage("register")} onForgotPassword={() => setPage("forgot")} />;
-  if (page === "register") return <RegisterPage onSuccess={() => setPage("home")} onSwitchToLogin={() => setPage("login")} />;
+  if (page === "login") return <LoginPage onSuccess={() => setPage("home")} onSwitchToRegister={() => setPage("register")} onForgotPassword={() => setPage("forgot")} onBack={() => setPage("home")} />;
+  if (page === "register") return <RegisterPage onSuccess={() => setPage("home")} onSwitchToLogin={() => setPage("login")} onBack={() => setPage("home")} />;
   if (page === "forgot") return <ForgotPasswordPage onBack={() => { window.history.replaceState({}, "", "/"); setPage("login"); }} />;
   if (page === "reset") return <ResetPasswordPage onDone={() => { window.history.replaceState({}, "", "/"); setPage("login"); }} />;
   if (page === "pricing") return <PricingPage onBack={() => setPage("home")} onRegister={() => setPage("register")} />;
