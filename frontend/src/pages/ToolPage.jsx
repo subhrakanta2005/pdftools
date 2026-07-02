@@ -1,5 +1,7 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import ThemeToggle from "../components/ThemeToggle";
+import { renderPdfThumbnail } from "../lib/pdfjs";
+import PageOrganizer from "../components/PageOrganizer";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -13,6 +15,47 @@ export default function ToolPage({ tool, onBack }) {
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef();
   const missingRequiredFile = tool.fields.some((f) => f.type === "file" && !fields[f.name]);
+  const missingPageSelection = tool.fields.some((f) => f.type === "pageSelect" && !fields[f.name]);
+  const [thumbs, setThumbs] = useState({}); // fileKey -> { url, kind: "image"|"pdf"|"none", loading }
+
+  const fileKey = (f) => `${f.name}_${f.size}_${f.lastModified}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    const objectUrls = [];
+
+    files.forEach((f) => {
+      const key = fileKey(f);
+      if (thumbs[key]) return; // already have (or are building) a thumbnail
+
+      if (f.type.startsWith("image/")) {
+        const url = URL.createObjectURL(f);
+        objectUrls.push(url);
+        setThumbs((prev) => ({ ...prev, [key]: { url, kind: "image", loading: false } }));
+      } else if (f.type === "application/pdf") {
+        setThumbs((prev) => ({ ...prev, [key]: { url: null, kind: "pdf", loading: true } }));
+        renderPdfThumbnail(f)
+          .then((dataUrl) => {
+            if (!cancelled) setThumbs((prev) => ({ ...prev, [key]: { url: dataUrl, kind: "pdf", loading: false } }));
+          })
+          .catch(() => {
+            if (!cancelled) setThumbs((prev) => ({ ...prev, [key]: { url: null, kind: "pdf", loading: false } }));
+          });
+      } else {
+        setThumbs((prev) => ({ ...prev, [key]: { url: null, kind: "none", loading: false } }));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      objectUrls.forEach((u) => URL.revokeObjectURL(u));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files]);
+
+  const removeFile = (idx) => {
+    setFiles((prev) => prev.filter((_, i) => i !== idx));
+  };
 
   const handleFiles = (newFiles) => {
     if (tool.multiFile) {
@@ -69,6 +112,7 @@ export default function ToolPage({ tool, onBack }) {
 
   const reset = () => {
     setFiles([]);
+    setThumbs({});
     setStatus("idle");
     setError("");
     setDownloadUrl(null);
@@ -137,17 +181,72 @@ export default function ToolPage({ tool, onBack }) {
                   <div style={{ color: "#888", fontSize: 14 }}>Accepts: {tool.accepts}</div>
                 </>
               ) : (
-                <div>
-                  {files.map((f, i) => (
-                    <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 8, color: "#333", fontSize: 14 }}>
-                      <span>📄</span>
-                      <span style={{ fontWeight: 600 }}>{f.name}</span>
-                      <span style={{ color: "#999" }}>({(f.size / 1024).toFixed(0)} KB)</span>
-                    </div>
-                  ))}
-                  <div style={{ color: tool.color, fontSize: 13, marginTop: 8, cursor: "pointer", fontWeight: 600 }}>
-                    {tool.multiFile ? "+ Add more files" : "Click to change file"}
+                <div onClick={(e) => e.stopPropagation()}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 16, justifyContent: "center" }}>
+                    {files.map((f, i) => {
+                      const thumb = thumbs[fileKey(f)];
+                      return (
+                        <div
+                          key={fileKey(f) + i}
+                          style={{
+                            position: "relative",
+                            width: 130,
+                            background: "#fff",
+                            border: "1px solid #e8eaf0",
+                            borderRadius: 10,
+                            overflow: "hidden",
+                            boxShadow: "0 2px 8px rgba(0,0,0,0.05)",
+                          }}
+                        >
+                          <button
+                            onClick={() => removeFile(i)}
+                            title="Remove file"
+                            style={{
+                              position: "absolute", top: 4, right: 4, width: 22, height: 22, borderRadius: "50%",
+                              border: "none", background: "rgba(0,0,0,0.55)", color: "#fff", fontSize: 13,
+                              lineHeight: "22px", textAlign: "center", cursor: "pointer", zIndex: 2, padding: 0,
+                            }}
+                          >
+                            ✕
+                          </button>
+                          <div style={{ height: 150, display: "flex", alignItems: "center", justifyContent: "center", background: "#f4f5f9", overflow: "hidden" }}>
+                            {thumb?.loading ? (
+                              <div style={{ fontSize: 13, color: "#999" }}>Loading…</div>
+                            ) : thumb?.url ? (
+                              <img src={thumb.url} alt={f.name} style={{ width: "100%", height: "100%", objectFit: thumb.kind === "image" ? "cover" : "contain" }} />
+                            ) : (
+                              <div style={{ fontSize: 40 }}>📄</div>
+                            )}
+                          </div>
+                          <div style={{ padding: "8px 10px", fontSize: 12, color: "#333", wordBreak: "break-word", lineHeight: 1.3 }}>
+                            {f.name.length > 26 ? f.name.slice(0, 24) + "…" : f.name}
+                            <div style={{ color: "#999", marginTop: 2 }}>{(f.size / 1024).toFixed(0)} KB</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {tool.multiFile && (
+                      <div
+                        onClick={() => inputRef.current.click()}
+                        style={{
+                          width: 130, height: 150 + 42, borderRadius: 10, border: `2px dashed ${tool.color}55`,
+                          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                          cursor: "pointer", color: tool.color, fontWeight: 700, fontSize: 13, gap: 6,
+                        }}
+                      >
+                        <span style={{ fontSize: 26 }}>＋</span>
+                        Add more
+                      </div>
+                    )}
                   </div>
+                  {!tool.multiFile && (
+                    <div
+                      onClick={() => inputRef.current.click()}
+                      style={{ color: tool.color, fontSize: 13, marginTop: 14, cursor: "pointer", fontWeight: 600, textAlign: "center" }}
+                    >
+                      Click to change file
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -161,7 +260,20 @@ export default function ToolPage({ tool, onBack }) {
                     <label style={{ display: "block", fontWeight: 600, fontSize: 13, color: "#444", marginBottom: 6 }}>
                       {field.label}
                     </label>
-                    {field.type === "select" ? (
+                    {field.type === "pageSelect" || field.type === "pageReorder" ? (
+                      files.length > 0 ? (
+                        <PageOrganizer
+                          key={fileKey(files[0])}
+                          file={files[0]}
+                          mode={field.type === "pageSelect" ? "select" : "reorder"}
+                          color={tool.color}
+                          selectLabel={field.type === "pageSelect" ? "Click pages to select them" : undefined}
+                          onChange={(value) => setFields((p) => ({ ...p, [field.name]: value }))}
+                        />
+                      ) : (
+                        <div style={{ color: "#999", fontSize: 13 }}>Upload a PDF above to see its pages here.</div>
+                      )
+                    ) : field.type === "select" ? (
                       <select
                         value={fields[field.name]}
                         onChange={(e) => setFields((p) => ({ ...p, [field.name]: e.target.value }))}
@@ -208,17 +320,17 @@ export default function ToolPage({ tool, onBack }) {
 
             <button
               onClick={handleSubmit}
-              disabled={files.length === 0 || missingRequiredFile || status === "uploading"}
+              disabled={files.length === 0 || missingRequiredFile || missingPageSelection || status === "uploading"}
               style={{
                 width: "100%",
                 padding: "16px",
                 borderRadius: 12,
                 border: "none",
-                background: files.length === 0 || missingRequiredFile ? "#ccc" : tool.color,
+                background: files.length === 0 || missingRequiredFile || missingPageSelection ? "#ccc" : tool.color,
                 color: "#fff",
                 fontSize: 16,
                 fontWeight: 700,
-                cursor: files.length === 0 || missingRequiredFile ? "not-allowed" : "pointer",
+                cursor: files.length === 0 || missingRequiredFile || missingPageSelection ? "not-allowed" : "pointer",
                 transition: "all 0.15s",
               }}
             >
