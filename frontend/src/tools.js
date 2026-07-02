@@ -91,10 +91,7 @@ export const TOOL_CATEGORIES = [
         multiFile: false,
         accepts: ".pdf",
         fields: [
-          { name: "x1", label: "Left (x1)", type: "number", placeholder: "0" },
-          { name: "y1", label: "Top (y1)", type: "number", placeholder: "0" },
-          { name: "x2", label: "Right (x2)", type: "number", placeholder: "595" },
-          { name: "y2", label: "Bottom (y2)", type: "number", placeholder: "842" },
+          { name: "x1", label: "Crop area", type: "cropSelect", placeholder: "" },
         ],
       },
       {
