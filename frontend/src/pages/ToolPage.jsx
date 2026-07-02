@@ -3,6 +3,9 @@ import ThemeToggle from "../components/ThemeToggle";
 import { renderPdfThumbnail } from "../lib/pdfjs";
 import PageOrganizer from "../components/PageOrganizer";
 import CropSelector from "../components/CropSelector";
+import RedactSelector from "../components/RedactSelector";
+import SignatureSelector from "../components/SignatureSelector";
+import PdfEditor from "../components/PdfEditor";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -17,6 +20,9 @@ export default function ToolPage({ tool, onBack }) {
   const inputRef = useRef();
   const missingRequiredFile = tool.fields.some((f) => f.type === "file" && !fields[f.name]);
   const missingPageSelection = tool.fields.some((f) => f.type === "pageSelect" && !fields[f.name]);
+  const missingRegions = tool.fields.some((f) => f.type === "redactSelect" && (!fields[f.name] || fields[f.name] === "[]"));
+  const missingOperations = tool.fields.some((f) => f.type === "editSelect" && (!fields[f.name] || fields[f.name] === "[]"));
+  const missingSignature = tool.fields.some((f) => f.type === "signSelect" && !fields.signature);
   const [thumbs, setThumbs] = useState({}); // fileKey -> { url, kind: "image"|"pdf"|"none", loading }
 
   const fileKey = (f) => `${f.name}_${f.size}_${f.lastModified}`;
@@ -256,7 +262,7 @@ export default function ToolPage({ tool, onBack }) {
             {tool.fields.length > 0 && (
               <div style={{ background: "#fff", borderRadius: 16, padding: "1.5rem", border: "1px solid #e8eaf0", marginBottom: "1.5rem" }}>
                 <h3 style={{ margin: "0 0 1rem", fontSize: 15, fontWeight: 700, color: "#1a1a2e" }}>Options</h3>
-                {tool.fields.map((field) => (
+                {tool.fields.filter((f) => !f.hidden).map((field) => (
                   <div key={field.name} style={{ marginBottom: "1rem" }}>
                     <label style={{ display: "block", fontWeight: 600, fontSize: 13, color: "#444", marginBottom: 6 }}>
                       {field.label}
@@ -271,6 +277,47 @@ export default function ToolPage({ tool, onBack }) {
                         />
                       ) : (
                         <div style={{ color: "#999", fontSize: 13 }}>Upload a PDF above to select a crop area.</div>
+                      )
+                    ) : field.type === "redactSelect" ? (
+                      files.length > 0 ? (
+                        <RedactSelector
+                          key={fileKey(files[0])}
+                          file={files[0]}
+                          color={tool.color}
+                          onChange={(regions) => setFields((p) => ({ ...p, [field.name]: JSON.stringify(regions) }))}
+                        />
+                      ) : (
+                        <div style={{ color: "#999", fontSize: 13 }}>Upload a PDF above to mark areas to redact.</div>
+                      )
+                    ) : field.type === "editSelect" ? (
+                      files.length > 0 ? (
+                        <PdfEditor
+                          key={fileKey(files[0])}
+                          file={files[0]}
+                          color={tool.color}
+                          onChange={(operations) => setFields((p) => ({ ...p, [field.name]: JSON.stringify(operations) }))}
+                        />
+                      ) : (
+                        <div style={{ color: "#999", fontSize: 13 }}>Upload a PDF above to start adding content.</div>
+                      )
+                    ) : field.type === "signSelect" ? (
+                      files.length > 0 ? (
+                        <SignatureSelector
+                          key={fileKey(files[0])}
+                          file={files[0]}
+                          color={tool.color}
+                          onChange={(result) => setFields((p) => ({
+                            ...p,
+                            signature: result ? result.signatureFile : "",
+                            page: result ? String(result.page) : "",
+                            x: result ? String(result.x) : "",
+                            y: result ? String(result.y) : "",
+                            width: result ? String(result.width) : "",
+                            height: result ? String(result.height) : "",
+                          }))}
+                        />
+                      ) : (
+                        <div style={{ color: "#999", fontSize: 13 }}>Upload a PDF above to sign it.</div>
                       )
                     ) : field.type === "pageSelect" || field.type === "pageReorder" ? (
                       files.length > 0 ? (
@@ -332,17 +379,17 @@ export default function ToolPage({ tool, onBack }) {
 
             <button
               onClick={handleSubmit}
-              disabled={files.length === 0 || missingRequiredFile || missingPageSelection || status === "uploading"}
+              disabled={files.length === 0 || missingRequiredFile || missingPageSelection || missingRegions || missingOperations || missingSignature || status === "uploading"}
               style={{
                 width: "100%",
                 padding: "16px",
                 borderRadius: 12,
                 border: "none",
-                background: files.length === 0 || missingRequiredFile || missingPageSelection ? "#ccc" : tool.color,
+                background: files.length === 0 || missingRequiredFile || missingPageSelection || missingRegions || missingOperations || missingSignature ? "#ccc" : tool.color,
                 color: "#fff",
                 fontSize: 16,
                 fontWeight: 700,
-                cursor: files.length === 0 || missingRequiredFile || missingPageSelection ? "not-allowed" : "pointer",
+                cursor: files.length === 0 || missingRequiredFile || missingPageSelection || missingRegions || missingOperations || missingSignature ? "not-allowed" : "pointer",
                 transition: "all 0.15s",
               }}
             >
