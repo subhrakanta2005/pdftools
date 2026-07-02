@@ -7,6 +7,7 @@ export default function LoginPage({ onSuccess, onSwitchToRegister, onForgotPassw
   const { login, loginWithGoogle } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -58,14 +59,25 @@ export default function LoginPage({ onSuccess, onSwitchToRegister, onForgotPassw
                 <span onClick={onForgotPassword} style={styles.forgotLink}>Forgot password?</span>
               )}
             </div>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-              style={styles.input}
-            />
+            <div style={styles.passwordWrap}>
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                required
+                style={styles.passwordInput}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                style={styles.eyeBtn}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                tabIndex={-1}
+              >
+                <EyeIcon open={showPassword} />
+              </button>
+            </div>
           </div>
 
           {error && <div style={styles.error}>{error}</div>}
@@ -81,6 +93,20 @@ export default function LoginPage({ onSuccess, onSwitchToRegister, onForgotPassw
         </p>
       </div>
     </div>
+  );
+}
+
+function EyeIcon({ open }) {
+  return open ? (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#888" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  ) : (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#888" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a18.5 18.5 0 0 1 4.22-5.06M9.9 4.24A9.12 9.12 0 0 1 12 5c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
   );
 }
 
@@ -109,6 +135,9 @@ const styles = {
   labelRow: { display: "flex", alignItems: "center", justifyContent: "space-between" },
   forgotLink: { fontSize: 13, fontWeight: 600, color: "#e63946", cursor: "pointer", marginBottom: 6 },
   input: { width: "100%", padding: "11px 14px", borderRadius: 10, border: "1.5px solid #dde", fontSize: 15, outline: "none", boxSizing: "border-box", fontFamily: "inherit" },
+  passwordWrap: { position: "relative" },
+  passwordInput: { width: "100%", padding: "11px 44px 11px 14px", borderRadius: 10, border: "1.5px solid #dde", fontSize: 15, outline: "none", boxSizing: "border-box", fontFamily: "inherit" },
+  eyeBtn: { position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", padding: 8, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 6 },
   error: { background: "#fff0f0", border: "1px solid #fcc", borderRadius: 8, padding: "10px 14px", color: "#c33", fontSize: 13, marginBottom: "1rem" },
   submitBtn: { width: "100%", padding: "13px", borderRadius: 10, border: "none", background: "#e63946", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", marginTop: 4 },
   switch: { textAlign: "center", fontSize: 14, color: "#777", marginTop: "1.5rem" },
