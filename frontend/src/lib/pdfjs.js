@@ -87,3 +87,50 @@ export async function renderAllPageThumbnails(file, onPage, maxWidth = 160) {
     pdf.destroy();
   }
 }
+
+// Just the page count, without rendering anything — used by selectors that
+// need prev/next bounds before the user has picked a page to view.
+export async function getPdfPageCount(file) {
+  const pdfjsLib = await getPdfjs();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  try {
+    return pdf.numPages;
+  } finally {
+    pdf.destroy();
+  }
+}
+
+// Same idea as renderPdfPageForCrop, but for an arbitrary 1-indexed page —
+// used by the redact/edit/sign selectors, which (unlike crop) need to work
+// on any page the user picks, not just page 1.
+export async function renderPdfPageAt(file, pageNumber1Indexed, maxWidth = 480) {
+  const pdfjsLib = await getPdfjs();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  try {
+    const numPages = pdf.numPages;
+    const clamped = Math.min(Math.max(1, pageNumber1Indexed), numPages);
+    const page = await pdf.getPage(clamped);
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(1, maxWidth / base.width);
+    const viewport = page.getViewport({ scale });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+
+    return {
+      pageNumber: clamped,
+      numPages,
+      dataUrl: canvas.toDataURL("image/jpeg", 0.85),
+      pxWidth: viewport.width,
+      pxHeight: viewport.height,
+      ptWidth: base.width,
+      ptHeight: base.height,
+    };
+  } finally {
+    pdf.destroy();
+  }
+}
