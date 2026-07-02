@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
 
-export default function RegisterPage({ onSuccess, onSwitchToLogin }) {
+export default function RegisterPage({ onSuccess, onSwitchToLogin, onBack }) {
   const { register, loginWithGoogle } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -26,6 +26,7 @@ export default function RegisterPage({ onSuccess, onSwitchToLogin }) {
 
   return (
     <div style={styles.overlay}>
+      <button onClick={onBack} style={styles.backBtn}>← Back to home</button>
       <div style={styles.card}>
         <div style={styles.logo}>📄 PDFTools</div>
         <h2 style={styles.title}>Create account</h2>
@@ -84,7 +85,8 @@ function GoogleIcon() {
 }
 
 const styles = {
-  overlay: { display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#f7f8fc", padding: "1rem" },
+  overlay: { display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#f7f8fc", padding: "1rem", position: "relative" },
+  backBtn: { position: "absolute", top: 24, left: 24, background: "none", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, color: "#666", display: "flex", alignItems: "center", gap: 6 },
   card: { background: "#fff", borderRadius: 20, padding: "2.5rem", width: "100%", maxWidth: 420, boxShadow: "0 4px 32px rgba(0,0,0,0.08)" },
   logo: { fontWeight: 900, fontSize: 22, color: "#e63946", marginBottom: "1.5rem", textAlign: "center" },
   title: { fontSize: 24, fontWeight: 800, color: "#1a1a2e", margin: "0 0 4px", textAlign: "center" },
