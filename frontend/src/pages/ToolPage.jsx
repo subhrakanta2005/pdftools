@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import ThemeToggle from "../components/ThemeToggle";
 import { renderPdfThumbnail } from "../lib/pdfjs";
 import PageOrganizer from "../components/PageOrganizer";
+import CropSelector from "../components/CropSelector";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -260,7 +261,18 @@ export default function ToolPage({ tool, onBack }) {
                     <label style={{ display: "block", fontWeight: 600, fontSize: 13, color: "#444", marginBottom: 6 }}>
                       {field.label}
                     </label>
-                    {field.type === "pageSelect" || field.type === "pageReorder" ? (
+                    {field.type === "cropSelect" ? (
+                      files.length > 0 ? (
+                        <CropSelector
+                          key={fileKey(files[0])}
+                          file={files[0]}
+                          color={tool.color}
+                          onChange={({ x1, y1, x2, y2 }) => setFields((p) => ({ ...p, x1, y1, x2, y2 }))}
+                        />
+                      ) : (
+                        <div style={{ color: "#999", fontSize: 13 }}>Upload a PDF above to select a crop area.</div>
+                      )
+                    ) : field.type === "pageSelect" || field.type === "pageReorder" ? (
                       files.length > 0 ? (
                         <PageOrganizer
                           key={fileKey(files[0])}
