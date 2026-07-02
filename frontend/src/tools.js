@@ -22,7 +22,7 @@ export const TOOL_CATEGORIES = [
         endpoint: "/split",
         multiFile: false,
         accepts: ".pdf",
-        fields: [{ name: "pages", label: "Pages to extract (e.g. 1-3,5,7)", type: "text", placeholder: "1,2,3-5" }],
+        fields: [{ name: "pages", label: "Select the pages to extract", type: "pageSelect", placeholder: "" }],
       },
       {
         id: "reorder",
@@ -32,7 +32,7 @@ export const TOOL_CATEGORIES = [
         endpoint: "/reorder",
         multiFile: false,
         accepts: ".pdf",
-        fields: [{ name: "order", label: "New page order (e.g. 3,1,2,4)", type: "text", placeholder: "2,1,3,4" }],
+        fields: [{ name: "order", label: "Drag pages to reorder them", type: "pageReorder", placeholder: "" }],
       },
       {
         id: "remove-pages",
@@ -42,7 +42,7 @@ export const TOOL_CATEGORIES = [
         endpoint: "/remove-pages",
         multiFile: false,
         accepts: ".pdf",
-        fields: [{ name: "pages", label: "Pages to remove (e.g. 2,4-6)", type: "text", placeholder: "1,3-5" }],
+        fields: [{ name: "pages", label: "Select the pages to remove", type: "pageSelect", placeholder: "" }],
       },
       {
         id: "rotate",
