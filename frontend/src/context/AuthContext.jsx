@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const AuthContext = createContext(null);
@@ -6,33 +6,45 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(undefined); // undefined = loading, null = guest
   const [loading, setLoading] = useState(true);
+  // Guards against two components (e.g. AuthProvider's own mount effect and
+  // AuthCallbackPage's refetch()) calling fetchMe at the same time. Without
+  // this, both would independently see a 401 and both call /auth/refresh
+  // with the same refresh_token cookie — the first rotates it, the second
+  // gets "Token revoked" on a token that was valid a moment ago.
+  const inFlightRef = useRef(null);
 
   const fetchMe = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/auth/me`, { credentials: "include" });
-      if (res.ok) {
-        const data = await res.json();
-        setUser(data.user);
-      } else if (res.status === 401) {
-        // Try refresh
-        const r2 = await fetch(`${API}/auth/refresh`, { method: "POST", credentials: "include" });
-        if (r2.ok) {
-          const res2 = await fetch(`${API}/auth/me`, { credentials: "include" });
-          if (res2.ok) {
-            const data2 = await res2.json();
-            setUser(data2.user);
-            return;
+    if (inFlightRef.current) return inFlightRef.current;
+    const promise = (async () => {
+      try {
+        const res = await fetch(`${API}/auth/me`, { credentials: "include" });
+        if (res.ok) {
+          const data = await res.json();
+          setUser(data.user);
+        } else if (res.status === 401) {
+          // Try refresh
+          const r2 = await fetch(`${API}/auth/refresh`, { method: "POST", credentials: "include" });
+          if (r2.ok) {
+            const res2 = await fetch(`${API}/auth/me`, { credentials: "include" });
+            if (res2.ok) {
+              const data2 = await res2.json();
+              setUser(data2.user);
+              return;
+            }
           }
+          setUser(null);
+        } else {
+          setUser(null);
         }
+      } catch {
         setUser(null);
-      } else {
-        setUser(null);
+      } finally {
+        setLoading(false);
+        inFlightRef.current = null;
       }
-    } catch {
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
+    })();
+    inFlightRef.current = promise;
+    return promise;
   }, []);
 
   useEffect(() => { fetchMe(); }, [fetchMe]);
