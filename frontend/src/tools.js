@@ -309,9 +309,8 @@ export const TOOL_CATEGORIES = [
         fields: [
           {
             name: "regions",
-            label: "Regions to redact (JSON — page is 0-indexed, coordinates in PDF points from top-left)",
-            type: "textarea",
-            placeholder: '[{"page":0,"x0":100,"y0":100,"x1":300,"y1":130}]',
+            label: "Mark areas to redact",
+            type: "redactSelect",
           },
         ],
       },
@@ -326,9 +325,8 @@ export const TOOL_CATEGORIES = [
         fields: [
           {
             name: "operations",
-            label: "Edit operations (JSON — page is 0-indexed, coordinates in PDF points from top-left)",
-            type: "textarea",
-            placeholder: '[{"type":"text","page":0,"x":100,"y":400,"text":"Approved","font_size":20,"color":[1,0,0]}]',
+            label: "Add content to the page",
+            type: "editSelect",
           },
         ],
       },
@@ -336,17 +334,17 @@ export const TOOL_CATEGORIES = [
         id: "sign",
         label: "Sign PDF",
         icon: "✍",
-        desc: "Stamp a signature image onto a page at a chosen position",
+        desc: "Draw your signature and place it on a page",
         endpoint: "/sign",
         multiFile: false,
         accepts: ".pdf",
         fields: [
-          { name: "signature", label: "Signature image (PNG with transparent background works best)", type: "file", accepts: ".png,.jpg,.jpeg" },
-          { name: "page", label: "Page number (0-indexed)", type: "number", placeholder: "0" },
-          { name: "x", label: "X position (PDF points from left)", type: "number", placeholder: "100" },
-          { name: "y", label: "Y position (PDF points from top)", type: "number", placeholder: "600" },
-          { name: "width", label: "Signature width", type: "number", placeholder: "150" },
-          { name: "height", label: "Signature height", type: "number", placeholder: "60" },
+          { name: "signature", label: "Sign and place your signature", type: "signSelect" },
+          { name: "page", label: "Page", type: "number", hidden: true },
+          { name: "x", label: "X", type: "number", hidden: true },
+          { name: "y", label: "Y", type: "number", hidden: true },
+          { name: "width", label: "Width", type: "number", hidden: true },
+          { name: "height", label: "Height", type: "number", hidden: true },
         ],
       },
       {
