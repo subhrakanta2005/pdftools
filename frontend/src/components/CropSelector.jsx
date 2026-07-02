@@ -10,6 +10,7 @@ import { renderPdfPageForCrop } from "../lib/pdfjs";
 export default function CropSelector({ file, color = "#e63946", onChange }) {
   const [page, setPage] = useState(null); // { dataUrl, pxWidth, pxHeight, ptWidth, ptHeight }
   const [box, setBox] = useState(null); // { x, y, w, h } in px, relative to the image
+  const [error, setError] = useState(null);
   const dragStart = useRef(null);
   const imgWrapRef = useRef();
 
@@ -17,13 +18,19 @@ export default function CropSelector({ file, color = "#e63946", onChange }) {
     let cancelled = false;
     setPage(null);
     setBox(null);
+    setError(null);
     renderPdfPageForCrop(file).then((p) => {
       if (cancelled) return;
       setPage(p);
       const full = { x: 0, y: 0, w: p.pxWidth, h: p.pxHeight };
       setBox(full);
       emit(full, p);
-    }).catch(() => {});
+    }).catch((err) => {
+      if (cancelled) return;
+      // eslint-disable-next-line no-console
+      console.error("CropSelector: page preview failed", err);
+      setError(err?.message || "Couldn't load a preview of this PDF.");
+    });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file]);
@@ -76,6 +83,16 @@ export default function CropSelector({ file, color = "#e63946", onChange }) {
       return finalBox;
     });
   };
+
+  if (error) {
+    return (
+      <div style={{ padding: "2rem", textAlign: "center", color: "#c1121f", fontSize: 14 }}>
+        Couldn't load a preview of this PDF: {error}
+        <br />
+        <span style={{ color: "#999", fontSize: 12.5 }}>Open the browser console for the full error.</span>
+      </div>
+    );
+  }
 
   if (!page) {
     return <div style={{ padding: "2rem", textAlign: "center", color: "#999", fontSize: 14 }}>Loading page preview…</div>;
