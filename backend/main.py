@@ -289,9 +289,14 @@ def _watermark_sync(data: bytes, text: str, opacity: float) -> bytes:
     doc = fitz.open(stream=data, filetype="pdf")
     for page in doc:
         w, h = page.rect.width, page.rect.height
+        point = fitz.Point(w * 0.15, h * 0.55)
+        # insert_text's `rotate` kwarg only accepts 0/90/180/270 — a 45°
+        # diagonal watermark needs an arbitrary-angle rotation, done via morph.
+        morph = (point, fitz.Matrix(1, 1).prerotate(45))
         page.insert_text(
-            fitz.Point(w * 0.15, h * 0.55), text, fontsize=60,
-            color=(0.5, 0.5, 0.5), rotate=45, overlay=True,
+            point, text, fontsize=60,
+            color=(0.5, 0.5, 0.5), morph=morph, overlay=True,
+            fill_opacity=opacity, stroke_opacity=opacity,
         )
     result = doc.tobytes()
     doc.close()
