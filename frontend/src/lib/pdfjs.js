@@ -18,12 +18,13 @@ export function getPdfjs() {
 export async function renderPdfThumbnail(file, maxWidth = 220) {
   const pdfjsLib = await getPdfjs();
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let pdf;
   try {
+    pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     const page = await pdf.getPage(1);
     return await renderPageToDataUrl(page, maxWidth);
   } finally {
-    pdf.destroy();
+    pdf?.destroy?.();
   }
 }
 
@@ -48,8 +49,9 @@ async function renderPageToDataUrl(page, maxWidth) {
 export async function renderPdfPageForCrop(file, maxWidth = 480) {
   const pdfjsLib = await getPdfjs();
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let pdf;
   try {
+    pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     const page = await pdf.getPage(1);
     const base = page.getViewport({ scale: 1 }); // width/height in PDF points
     const scale = Math.min(1, maxWidth / base.width);
@@ -68,15 +70,16 @@ export async function renderPdfPageForCrop(file, maxWidth = 480) {
       ptHeight: base.height,
     };
   } finally {
-    pdf.destroy();
+    pdf?.destroy?.();
   }
 }
 
 export async function renderAllPageThumbnails(file, onPage, maxWidth = 160) {
   const pdfjsLib = await getPdfjs();
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let pdf;
   try {
+    pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const dataUrl = await renderPageToDataUrl(page, maxWidth);
@@ -84,7 +87,7 @@ export async function renderAllPageThumbnails(file, onPage, maxWidth = 160) {
     }
     return pdf.numPages;
   } finally {
-    pdf.destroy();
+    pdf?.destroy?.();
   }
 }
 
@@ -93,11 +96,12 @@ export async function renderAllPageThumbnails(file, onPage, maxWidth = 160) {
 export async function getPdfPageCount(file) {
   const pdfjsLib = await getPdfjs();
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let pdf;
   try {
+    pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     return pdf.numPages;
   } finally {
-    pdf.destroy();
+    pdf?.destroy?.();
   }
 }
 
@@ -107,8 +111,9 @@ export async function getPdfPageCount(file) {
 export async function renderPdfPageAt(file, pageNumber1Indexed, maxWidth = 480) {
   const pdfjsLib = await getPdfjs();
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let pdf;
   try {
+    pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     const numPages = pdf.numPages;
     const clamped = Math.min(Math.max(1, pageNumber1Indexed), numPages);
     const page = await pdf.getPage(clamped);
@@ -131,6 +136,6 @@ export async function renderPdfPageAt(file, pageNumber1Indexed, maxWidth = 480) 
       ptHeight: base.height,
     };
   } finally {
-    pdf.destroy();
+    pdf?.destroy?.();
   }
 }
