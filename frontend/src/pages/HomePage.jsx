@@ -230,7 +230,9 @@ export default function HomePage({ onSelectTool, onLogin, onRegister, onPricing,
             </div>
           </div>
           <a
-            href="#"
+            href="https://pixly-umber.vercel.app"
+            target="_blank"
+            rel="noopener noreferrer"
             style={{
               padding: "10px 20px",
               borderRadius: 8,
@@ -356,3 +358,5 @@ function ToolCard({ tool, color, onClick }) {
     </div>
   );
 }
+
+
